@@ -698,7 +698,31 @@ class Main:
 
 # ------------------------------------------------------------ calibration
 
-def _recolter(main: Main, duree: float, bavard: bool = False) -> dict:
+def _publier_calibration(visu, main, consigne, reste=None) -> None:
+    """Retour camera pendant la calibration.
+
+    Jusqu'ici la calibration se faisait a l'aveugle : le panneau camera
+    n'apparait qu'une fois la boucle de pilotage lancee, c'est-a-dire apres.
+    Se placer correctement relevait donc de la devinette, et un echec disait
+    "main non detectee" sans qu'on puisse voir si la main etait cadree, nette,
+    ou simplement absente.
+    """
+    if visu is None:
+        return
+    jpeg = _vue_annotee(main)
+    if jpeg is None:
+        return
+    d = {"etape": consigne,
+         "main": "vue" if main.reperes is not None else "ABSENTE"}
+    if reste is not None:
+        d["reste"] = "%.0f s" % reste
+    if main.travee_a:
+        d["travee px"] = "%.0f" % main.travee_a
+    visu.publier_image(jpeg, d)
+
+
+def _recolter(main: Main, duree: float, bavard: bool = False,
+              visu=None, consigne: str = "mesure") -> dict:
     """Accumule les mesures pendant une duree, par grandeur.
 
     Avec bavard, affiche la distance vue en direct : sans ca, impossible de
@@ -711,8 +735,12 @@ def _recolter(main: Main, duree: float, bavard: bool = False) -> dict:
     main.porte.reset()
     main.recentes = []
     fin = time.time() + duree
+    prochaine = 0.0
     while time.time() < fin:
         m = main.lire()
+        if time.time() > prochaine:
+            prochaine = time.time() + 0.25
+            _publier_calibration(visu, main, consigne, fin - time.time())
         if m:
             v["taille"].append(m["taille"])
             if main.travee_a:
@@ -763,7 +791,7 @@ def _pente(xs, ys):
     return num / den if den > 1e-9 else 0.0
 
 
-def calibrer(main: Main) -> dict:
+def calibrer(main: Main, visu=None) -> dict:
     """Quatre temps, et du temps pour se placer.
 
     Le balayage vertical a disparu : la plage de pilotage est desormais la
@@ -777,12 +805,21 @@ def calibrer(main: Main) -> dict:
     print("%.0f s pour te placer, puis %.0f s de mesure a chaque fois.\n"
           % (attente, duree))
 
+    courante = [""]                     # consigne en cours, pour le panneau
+
     def etape(n, consigne, detail):
-        print(" %d/4  %s" % (n, consigne))
+        courante[0] = "%d/4  %s" % (n, consigne)
+        print(" %s" % courante[0])
         print("      %s" % detail)
+        if visu is not None:
+            print("      (retour camera dans le simulateur)")
         reste = attente
+        prochaine = 0.0
         while reste > 0.05:
             main.lire()                 # on garde la detection vivante
+            if time.time() > prochaine:
+                prochaine = time.time() + 0.25
+                _publier_calibration(visu, main, courante[0], reste)
             if abs(reste - round(reste)) < 0.03 and round(reste) > 0:
                 print("   %d..." % round(reste), flush=True)
             time.sleep(0.1)
@@ -791,7 +828,7 @@ def calibrer(main: Main) -> dict:
 
     etape(1, "POSE DE TRAVAIL : main OUVERTE, paume vers la camera",
           "doigts bien ecartes, a la distance ou tu piloteras le plus souvent")
-    v = _recolter(main, duree)
+    v = _recolter(main, duree, visu=visu, consigne=courante[0])
     if len(v["dist"]) < 5:
         raise SystemExit("main non detectee - verifie l'eclairage et le cadrage")
     ref = _mediane(v["taille"])
@@ -807,20 +844,20 @@ def calibrer(main: Main) -> dict:
 
     etape(2, "PINCE FERMEE : pouce et index qui se TOUCHENT",
           "colle-les vraiment l'un contre l'autre, sans bouger la main")
-    v = _recolter(main, duree)
+    v = _recolter(main, duree, visu=visu, consigne=courante[0])
     pince_fermee = _mediane(v["pince"]) if len(v["pince"]) >= 5 else 0.25
 
     mini = REGLAGES["course_mini_m"]
     etape(3, "LE PLUS PRES : avance la main vers la camera",
           "aussi pres que tu la piloteras, main ouverte")
-    v = _recolter(main, duree, bavard=True)
+    v = _recolter(main, duree, bavard=True, visu=visu, consigne=courante[0])
     if len(v["dist"]) < 5:
         raise SystemExit("main perdue pendant la calibration de profondeur")
     d_proche = _quantile(v["dist"], 0.15)
 
     etape(4, "LE PLUS LOIN : recule la main",
           "aussi loin que tu la piloteras, main ouverte")
-    v = _recolter(main, duree, bavard=True)
+    v = _recolter(main, duree, bavard=True, visu=visu, consigne=courante[0])
     if len(v["dist"]) < 5:
         raise SystemExit("main perdue pendant la calibration de profondeur")
     d_loin = _quantile(v["dist"], 0.85)
@@ -1193,7 +1230,7 @@ def principal(args) -> int:
         print("servos non pilotes (ajouter --servos)")
 
     regler_exposition(main)
-    cal = calibrer(main)
+    cal = calibrer(main, visu)
 
     print()
     # Relevee au-dela des bornes courantes : les molettes font varier r_min et
