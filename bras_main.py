@@ -168,6 +168,20 @@ REGLAGES = {
     "r_min": 110.0, "r_max": 310.0,
     "r_sens": 1,          # 1 : main proche de la camera = bras tendu
 
+    # --- pilotage cartesien, mode alternatif --------------------------
+    # 0 = polaire : la profondeur commande le rayon, donc le bras s'allonge
+    #     dans la direction ou il pointe deja. "Avancer la main" ne veut pas
+    #     dire la meme chose selon l'angle de base.
+    # 1 = cartesien : la profondeur commande l'avance devant le boitier et
+    #     la main laterale commande le deport lateral, independamment. Les
+    #     trois zones mortes deviennent alors des millimetres, partout.
+    # La verticale n'est pas touchee : elle reste celle du mode polaire.
+    "cartesien": 0.0,
+    "av_min": 120.0, "av_max": 300.0,   # avance devant l'axe de base, en mm
+    "lat_amplitude": 200.0,             # deport lateral, +/- mm
+    "lat_sens": -1,                     # meme convention que base_sens
+    "ancre_lat_mm": 12.0,               # zone morte laterale, en mm
+
     # ouverture de pince, rapport ecart(pouce,index) / taille de main
     "pince_fermee": 0.30,
 
@@ -214,9 +228,10 @@ NOMS = ("base", "epaule", "coude", "inclinaison", "rotation")
 # Reglages modifiables depuis la page du simulateur, sans relancer le
 # programme. Refaire la calibration a chaque essai rendait tout reglage fin
 # impraticable : une valeur se juge sur dix prises de jeton, pas sur une.
-MOLETTES = ("deprojection",
-            "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "zone_morte_deg",
-            "vitesse_max_deg", "base_amplitude", "r_min", "r_max",
+MOLETTES = ("deprojection", "cartesien",
+            "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "ancre_lat_mm",
+            "zone_morte_deg", "vitesse_max_deg", "base_amplitude",
+            "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
             "x_min", "x_max", "y_min", "y_max")
 
 
@@ -1010,6 +1025,60 @@ def commandes(m: dict, cal: dict, r: dict, table=None):
     return base, rayon, z, ouverture, 1000.0 * dist
 
 
+def commandes_cartesien(m: dict, cal: dict, r: dict):
+    """Avance et deport lateral, au lieu d'un angle et d'un rayon.
+
+    En polaire la profondeur commande le rayon : le bras s'allonge dans la
+    direction ou il pointe deja, si bien qu'"avancer la main" envoie la pince
+    vers l'avant-gauche quand la base est a 35 degres, et vers l'avant-droit
+    a 145. La direction du geste depend de l'endroit ou l'on se trouve.
+
+    Ici les deux grandeurs sont independantes et toutes deux en millimetres :
+    l'avance devant l'axe de base, et le deport lateral. Consequence utile, la
+    zone morte laterale cesse d'etre un angle dont la valeur en millimetres
+    double entre le bras replie et le bras tendu.
+
+    La verticale n'est pas touchee : elle reste calculee comme en polaire, a
+    partir de la course disponible au rayon atteint. Le but est de mesurer un
+    seul changement a la fois.
+    """
+    mx, my = _deprojeter(m, r)
+    m["x_corr"], m["y_corr"] = mx, my
+
+    lat = r["lat_sens"] * _interp(mx, r["x_min"], r["x_max"],
+                                  -r["lat_amplitude"], r["lat_amplitude"])
+    dist = m["distance"]
+    if r["r_sens"] > 0:
+        av = _interp(dist, cal["d_loin"], cal["d_proche"],
+                     r["av_min"], r["av_max"])
+    else:
+        av = _interp(dist, cal["d_loin"], cal["d_proche"],
+                     r["av_max"], r["av_min"])
+
+    ouverture = _interp(m["pince"], cal["pince_fermee"],
+                        cal["pince_ouverte"], 0.0, 40.0)
+    return av, lat, ouverture, 1000.0 * dist
+
+
+def rabattre(av: float, lat: float, r: dict):
+    """Ramene une consigne cartesienne dans le secteur atteignable.
+
+    L'espace du bras est un secteur d'anneau, pas un pave : une consigne
+    cartesienne peut tomber dehors. Laisser la cinematique inverse echouer
+    figerait le bras dans les coins, sans explication visible. On projette
+    donc sur le point atteignable le plus proche et la pince glisse le long
+    du bord, ce qui se comprend tout de suite en le faisant.
+    """
+    rayon = math.hypot(av, lat)
+    if rayon < 1e-6:
+        return r["r_min"], 0.0, r["r_min"], 0.0
+    angle = _borne(math.degrees(math.atan2(lat, av)),
+                   -r["base_amplitude"], r["base_amplitude"])
+    rayon = _borne(rayon, r["r_min"], r["r_max"])
+    a = math.radians(angle)
+    return rayon * math.cos(a), rayon * math.sin(a), rayon, angle
+
+
 # ----------------------------------------------------------------- moteur
 
 class Resolveur:
@@ -1284,6 +1353,11 @@ def principal(args) -> int:
     f_base = lisseur(r["ancre_base_deg"])
     f_r = lisseur(r["ancre_r_mm"])
     f_z = lisseur(r["ancre_z_mm"])
+    # le mode cartesien filtre des millimetres d'avance et de deport, pas un
+    # angle et un rayon : il lui faut ses propres filtres, sinon basculer
+    # d'un mode a l'autre melangerait des degres a des millimetres
+    f_av = lisseur(r["ancre_r_mm"])
+    f_lat = lisseur(r["ancre_lat_mm"])
     # la pince, elle, va bien avec un passe-bas : son signal est franc
     f_p = UnEuro(1.2, 0.05)
 
@@ -1291,7 +1365,8 @@ def principal(args) -> int:
     # partir des valeurs publiees par /etat, et personne ne les publiait. On
     # les pose donc au demarrage, puis on relit ce que la page a deplace.
     molettes = {k: float(r[k]) for k in MOLETTES}
-    seuils = {"ancre_base_deg": f_base, "ancre_r_mm": f_r, "ancre_z_mm": f_z}
+    seuils = {"ancre_base_deg": f_base, "ancre_r_mm": f_r, "ancre_z_mm": f_z,
+              "ancre_lat_mm": f_lat}
     if visu:
         visu.poser_reglages(molettes)
 
@@ -1305,6 +1380,14 @@ def principal(args) -> int:
             molettes[cle] = r[cle] = val
             if cle in seuils:
                 seuils[cle].ancre.seuil = val
+            if cle == "cartesien":
+                # on change d'unites : les ancres du mode qu'on prend gardent
+                # la position de la main d'il y a plusieurs secondes, ce qui
+                # produirait un sursaut. On les repart a neuf.
+                for f in (f_base, f_r, f_av, f_lat):
+                    f.ancre.y = None
+                print("  mode : %s" % ("cartesien" if val else "polaire"))
+                continue
             print("  molette : %s = %g" % (cle, val))
 
     envoyes = None
@@ -1354,14 +1437,31 @@ def principal(args) -> int:
             derniere_main = t
 
 
-            cb, cr, cz, co, dmm = commandes(m, cal, r, table)
-            distances.append(dmm)
-            cb, cr, cz, co = f_base(cb, t), f_r(cr, t), f_z(cz, t), f_p(co, t)
+            if r["cartesien"]:
+                av, lat, co, dmm = commandes_cartesien(m, cal, r)
+                distances.append(dmm)
+                av, lat, co = f_av(av, t), f_lat(lat, t), f_p(co, t)
+                av, lat, cr, angle = rabattre(av, lat, r)
+                cb = 90.0 + angle
+                # la verticale reste celle du mode polaire : course disponible
+                # au rayon atteint, puis la meme ancre en millimetres
+                bas, haut = bornes_hauteur(table, cr)
+                if r["z_sens"] > 0:
+                    cz = _interp(m["y_corr"], r["y_min"], r["y_max"], haut, bas)
+                else:
+                    cz = _interp(m["y_corr"], r["y_min"], r["y_max"], bas, haut)
+                cz = _borne(f_z(cz, t), bas, haut)
+            else:
+                cb, cr, cz, co, dmm = commandes(m, cal, r, table)
+                distances.append(dmm)
+                cb, cr, cz, co = (f_base(cb, t), f_r(cr, t),
+                                  f_z(cz, t), f_p(co, t))
+                # le bras travaille du cote oppose a la pose repliee
+                a = math.radians(cb - 90.0)
+                av, lat = cr * math.cos(a), cr * math.sin(a)
 
-            # le bras travaille du cote oppose a la pose repliee
-            a = math.radians(cb - 90.0)
-            x = b.base[0] - cr * math.cos(a)
-            y = b.base[1] - cr * math.sin(a)
+            x = b.base[0] - av
+            y = b.base[1] - lat
 
             sol, ecart = resoudre(x, y, cz)
             if sol is None:
@@ -1443,10 +1543,15 @@ if __name__ == "__main__":
     p.add_argument("--deprojection", action="store_true",
                    help="demarrer avec la correction de perspective active "
                         "(reglable ensuite depuis la page)")
+    p.add_argument("--cartesien", action="store_true",
+                   help="demarrer en pilotage cartesien plutot que polaire "
+                        "(reglable ensuite depuis la page)")
     a = p.parse_args()
     if a.flip is not None:
         REGLAGES["flip"] = {"aucune": None, "verticale": 0,
                             "horizontale": 1, "180": -1}[a.flip]
     if a.deprojection:
         REGLAGES["deprojection"] = 1.0
+    if a.cartesien:
+        REGLAGES["cartesien"] = 1.0
     raise SystemExit(principal(a))
