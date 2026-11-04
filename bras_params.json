@@ -1,0 +1,28 @@
+{
+  "_comment": "Bras robotique 5 axes - parametres geometriques et convention servo. Longueurs en mm, angles en degres. Repere d'assemblage Fusion 360 : origine au coin du boitier, Z vers le haut, plan sagittal du bras en Y = 50.",
+  "_source": "releve automatique sur les exports STL, valide dans le simulateur 3D",
+  "_date": "2026-11-03",
+
+  "base":    { "x": 50.00,  "y": 50.00 },
+  "epaule":  { "x": 34.88,  "z": 100.91 },
+  "coude":   { "x": 184.88, "z": 131.10 },
+  "poignet": { "x": 4.41,   "z": 136.00 },
+  "rotation":{ "x": 19.91,  "y": 50.00 },
+
+  "grasp_z": 252.0,
+  "_grasp_z_comment": "hauteur du centre des mors en pose CAO ; a remonter quand les doigts seront montes",
+
+  "plan_travail_z": 85.0,
+  "couvercle": { "x0": 0.0, "x1": 170.0, "y0": 0.0, "y1": 100.0, "z_boitier": 70.0 },
+
+  "pince": { "course_totale": 40.0, "direction": "Y" },
+
+  "axes": [
+    { "id": "base",       "nom": "Base - rotation",        "ref": 90, "sens":  1, "min": 0, "max": 180 },
+    { "id": "epaule",     "nom": "Epaule",                 "ref":  0, "sens": -1, "min": 0, "max": 180 },
+    { "id": "coude",      "nom": "Coude",                  "ref":  0, "sens":  1, "min": 0, "max": 180 },
+    { "id": "inclinaison","nom": "Poignet - inclinaison",  "ref":  0, "sens": -1, "min": 0, "max": 180 },
+    { "id": "rotation",   "nom": "Poignet - rotation",     "ref": 90, "sens":  1, "min": 0, "max": 180 }
+  ],
+  "_axes_comment": "angle geometrique = sens * (servo - ref) ; ref est l'angle servo correspondant a la pose CAO exportee de Fusion (bras replie, pince vers le haut)"
+}

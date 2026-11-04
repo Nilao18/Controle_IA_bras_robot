@@ -1,0 +1,1027 @@
+<meta charset="utf-8">
+<title>Simulateur bras Würth</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+/* Atelier : vue 3D pleine hauteur + rail d'instruments a droite, empile sous 900px. */
+:root{
+  --bg:#eceef0; --panel:#f7f8f9; --panel-2:#e3e6e9; --line:#ccd2d7;
+  --fg:#16191c; --fg-dim:#5d666e; --fg-faint:#8b949c;
+  --accent:#0d6d6b; --accent-soft:#c9e3e1;
+  --warn:#b1560c; --bad:#9d2b2b;
+  --j1:#0d6d6b; --j2:#1f5f9e; --j3:#8a4d9e; --j4:#b1560c; --j5:#9d2b5e;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --cond:"IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;
+  color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#14181a; --panel:#1c2124; --panel-2:#262c30; --line:#333c41;
+  --fg:#e7ecee; --fg-dim:#9aa5ac; --fg-faint:#6b767d;
+  --accent:#4fcfc6; --accent-soft:#1d3c3c;
+  --warn:#e59447; --bad:#e2706b;
+  --j1:#4fcfc6; --j2:#6ab0ec; --j3:#c192dd; --j4:#e59447; --j5:#ee87ad;
+  color-scheme:dark;
+}}
+:root[data-theme="dark"]{
+  --bg:#14181a; --panel:#1c2124; --panel-2:#262c30; --line:#333c41;
+  --fg:#e7ecee; --fg-dim:#9aa5ac; --fg-faint:#6b767d;
+  --accent:#4fcfc6; --accent-soft:#1d3c3c;
+  --warn:#e59447; --bad:#e2706b;
+  --j1:#4fcfc6; --j2:#6ab0ec; --j3:#c192dd; --j4:#e59447; --j5:#ee87ad;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);overflow:hidden}
+*{box-sizing:border-box}
+
+#app{height:100%;display:grid;grid-template-columns:1fr 332px;gap:0}
+#stage{position:relative;min-width:0;background:var(--bg)}
+#cv{display:block;width:100%;height:100%;touch-action:none}
+
+#hud{position:absolute;left:0;top:0;padding:14px;padding-left:max(14px,env(safe-area-inset-left,0px));pointer-events:none}
+#hud h1{margin:0;font-family:var(--cond);font-size:17px;font-weight:700;letter-spacing:.02em;text-wrap:balance}
+#hud p{margin:2px 0 0;font-size:11.5px;color:var(--fg-dim);font-family:var(--mono)}
+
+#live{margin:6px 0 0;font-family:var(--mono);font-size:11px;font-weight:500;
+  color:var(--accent);letter-spacing:.02em}
+#live.perdu{color:var(--bad)}
+#rail.verrou .joint input[type=range]{pointer-events:none;opacity:.75}
+#rail.verrou .lim{opacity:.45;pointer-events:none}
+#loading{position:absolute;inset:0;display:grid;place-items:center;background:var(--bg);font-family:var(--mono);font-size:12px;color:var(--fg-dim);z-index:5}
+
+#rail{background:var(--panel);border-left:1px solid var(--line);overflow-y:auto;overflow-x:hidden;
+  padding-block:14px 28px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px));
+  display:flex;flex-direction:column;gap:16px}
+
+.sec{display:flex;flex-direction:column;gap:9px}
+.sec>h2{margin:0;font-family:var(--cond);font-size:11px;font-weight:600;letter-spacing:.1em;
+  text-transform:uppercase;color:var(--fg-faint)}
+
+.joint{display:flex;flex-direction:column;gap:5px;padding:9px 10px;background:var(--panel-2);
+  border-radius:3px;border-left:3px solid var(--jc)}
+.joint .top{display:flex;align-items:baseline;gap:8px}
+.joint .nm{font-family:var(--cond);font-size:12.5px;font-weight:600;flex:1;min-width:0}
+.joint .dlt{font-family:var(--mono);font-size:10.5px;color:var(--fg-faint);font-variant-numeric:tabular-nums}
+.joint .val{font-family:var(--mono);font-size:13px;font-weight:500;font-variant-numeric:tabular-nums;color:var(--jc)}
+.joint input[type=range]{width:100%;margin:0;accent-color:var(--jc);height:18px}
+.joint .lim{display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10.5px;color:var(--fg-faint)}
+.joint .lim input{width:48px;background:var(--panel);color:var(--fg);border:1px solid var(--line);
+  border-radius:2px;padding:2px 4px;font-family:var(--mono);font-size:10.5px;text-align:right}
+.joint .lim span{flex:1;text-align:center}
+.joint .inv{width:58px;padding:2px 4px;font-family:var(--mono);font-size:10.5px;font-weight:400;
+  letter-spacing:0;background:var(--panel);border-color:var(--line)}
+
+#tcp{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);
+  border:1px solid var(--line);border-radius:3px;overflow:hidden}
+#tcp div{background:var(--panel-2);padding:7px 8px;min-width:0}
+#tcp dt{margin:0;font-family:var(--cond);font-size:9.5px;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--fg-faint)}
+#tcp dd{margin:1px 0 0;font-family:var(--mono);font-size:14px;font-variant-numeric:tabular-nums}
+
+#status{font-family:var(--mono);font-size:11px;padding:7px 9px;border-radius:3px;
+  background:var(--accent-soft);color:var(--fg);border-left:3px solid var(--accent)}
+#status.warn{border-left-color:var(--warn)}
+#status.bad{border-left-color:var(--bad)}
+
+#reach{width:100%;height:auto;display:block;border:1px solid var(--line);border-radius:3px;background:var(--panel-2);max-width:100%}
+.cap{font-family:var(--mono);font-size:10.5px;color:var(--fg-faint);line-height:1.45}
+.key{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:-1px;margin-right:3px}
+.key.k1{background:var(--accent-soft);border:1px solid var(--accent)}
+.key.k2{background:var(--j5)}
+
+.row{display:flex;gap:7px;flex-wrap:wrap}
+button{font-family:var(--cond);font-size:11.5px;font-weight:600;letter-spacing:.03em;
+  background:var(--panel-2);color:var(--fg);border:1px solid var(--line);border-radius:3px;
+  padding:6px 10px;cursor:pointer}
+button:hover{border-color:var(--accent);color:var(--accent)}
+button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--panel)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+.tool{display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;color:var(--fg-dim)}
+.tool input{width:60px;background:var(--panel-2);color:var(--fg);border:1px solid var(--line);
+  border-radius:2px;padding:3px 5px;font-family:var(--mono);font-size:11px;text-align:right}
+
+table.geo{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10.5px;
+  font-variant-numeric:tabular-nums}
+table.geo td{padding:3px 0;border-bottom:1px solid var(--line);color:var(--fg-dim)}
+table.geo td:last-child{text-align:right;color:var(--fg)}
+table.geo tr:last-child td{border-bottom:none}
+
+@media (max-width:900px){
+  body{overflow:auto}
+  #app{grid-template-columns:1fr;height:auto}
+  #stage{height:62vh;min-height:320px}
+  #rail{border-left:none;border-top:1px solid var(--line)}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<div id="app">
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="hud">
+      <h1>Bras 5 axes — pose courante</h1>
+      <p id="sub">repère Fusion 360, origine coin du boîtier</p>
+      <p id="live" hidden>suivi direct — <span id="liveEtat">connexion…</span></p>
+    </div>
+    <div id="loading">chargement de la géométrie…</div>
+  </div>
+
+  <aside id="rail">
+    <section class="sec">
+      <h2>Axes</h2>
+      <div id="joints"></div>
+    </section>
+
+    <section class="sec">
+      <h2>Point outil (TCP)</h2>
+      <dl id="tcp">
+        <div><dt>X</dt><dd id="tx">—</dd></div>
+        <div><dt>Y</dt><dd id="ty">—</dd></div>
+        <div><dt>Z</dt><dd id="tz">—</dd></div>
+      </dl>
+      <div id="status">—</div>
+      <div class="tool">
+        <label for="tL">centre des mors</label><input id="tL" type="number" value="252" step="1" min="235" max="262">
+        <span>Z en pose CAO</span>
+      </div>
+      <div class="tool">
+        <label for="tOuv">ouverture</label>
+        <input id="tOuv" type="range" min="0" max="40" step="1" value="0" style="flex:1;min-width:0;accent-color:var(--accent)">
+        <span id="ouvVal" style="width:46px;text-align:right">0 mm</span>
+      </div>
+      <p class="cap">Le TCP est sur l'axe de rotation du poignet, entre les deux mors. Les faces d'appui des mors occupent Z 242 à 260 en pose CAO ; 252 est le milieu. À remonter une fois les doigts montés sur les mors. L'ouverture écarte les mors symétriquement le long de Y, écart mesuré entre leurs faces.</p>
+    </section>
+
+    <section class="sec">
+      <h2>Portée — plan sagittal</h2>
+      <canvas id="reach" width="660" height="470"></canvas>
+      <p class="cap"><span class="key k1"></span>toutes orientations de pince &nbsp; <span class="key k2"></span>pince verticale. R = distance à l'axe de base, Z = hauteur au-dessus de la table. Chaque pose est testée en interpénétration réelle maillage contre maillage, sur les 24 paires de pièces, pince comprise.</p>
+    </section>
+
+    <section class="sec">
+      <h2>Poses</h2>
+      <div class="row">
+        <button type="button" data-pose="90,0,0,0,90">Réf. pliée</button>
+        <button type="button" data-pose="90,33,33,180,90">Prise R100</button>
+        <button type="button" data-pose="90,75,63,168,90">Prise R200</button>
+        <button type="button" data-pose="90,105,99,174,90">Prise R280</button>
+        <button type="button" data-pose="90,66,66,180,90">Transfert</button>
+      </div>
+      <div class="row">
+        <button type="button" id="bAxes" aria-pressed="true">Axes</button>
+        <button type="button" id="bEnv" aria-pressed="true">Cercles 250/300</button>
+        <button type="button" id="bSpin" aria-pressed="false">Balayage</button>
+        <button type="button" id="bFit">Recadrer</button>
+        <button type="button" id="bBlock" aria-pressed="true">Butées de collision</button>
+      </div>
+    </section>
+
+    <section class="sec">
+      <h2>Géométrie mesurée</h2>
+      <table class="geo">
+        <tr><td>axe base (vertical)</td><td>X 50,0 · Y 50,0</td></tr>
+        <tr><td>axe épaule</td><td>X 34,9 · Z 100,9</td></tr>
+        <tr><td>axe coude</td><td>X 184,9 · Z 131,1</td></tr>
+        <tr><td>axe inclinaison</td><td>X 4,4 · Z 136,0</td></tr>
+        <tr><td>axe rotation poignet</td><td>X 19,9 · Y 50,0 (vertical)</td></tr>
+        <tr><td>bras (épaule→coude)</td><td>153,0 mm</td></tr>
+        <tr><td>avant-bras (coude→poignet)</td><td>180,5 mm</td></tr>
+        <tr><td>plan de travail</td><td>Z = 85 mm</td></tr>
+        <tr><td>bras en pose CAO</td><td>+11,4° / horizontale</td></tr>
+        <tr><td>coude en pose CAO</td><td>replié à 12,9°</td></tr>
+        <tr><td>pince, course totale</td><td>40 mm (± 20 par mors)</td></tr>
+        <tr><td>guidage des mors</td><td>2 tiges Ø5 le long de Y</td></tr>
+      </table>
+      <p class="cap">Axes relevés sur les alésages Ø6 partagés entre pièces consécutives. Axe de base : alésage Ø20 du support rotatif. Les curseurs sont des angles servo ; « réf. pose CAO » est l'angle servo qui correspond au modèle Fusion tel qu'exporté.</p>
+    </section>
+  </aside>
+</div>
+
+<script src="geometry.js"></script>
+<script src="collide.js"></script>
+<script src="three.min.js"></script>
+<script>
+(function(){
+"use strict";
+
+// ---------- geometrie relevee sur les STL ----------
+var BASE   = {x:50.00, y:50.00};        // axe vertical
+var SHOULD = {x:34.88, z:100.91};       // axe Y
+var ELBOW  = {x:184.88, z:131.10};      // axe Y
+var WRIST  = {x:4.41,  z:136.00};       // axe Y
+var ROT    = {x:19.91, y:50.00};        // axe Z (rotation poignet)
+var GRASP_Z0 = 252.0;                   // centre des mors en pose CAO
+var TABLE_Z = 85.0;                     // dessus du couvercle
+var LID = {x0:0, x1:170, y0:0, y1:100}; // emprise du couvercle
+
+// val / min / max / ref sont des ANGLES SERVO (0-180). ref = angle servo correspondant
+// a la pose CAO. sign = sens de rotation geometrique quand l'angle servo augmente.
+var JOINTS = [
+  {id:"j1", nm:"Base — rotation",      col:"--j1", min:0, max:180, val:90, ref:90, sign: 1},
+  {id:"j2", nm:"Épaule",               col:"--j2", min:0, max:180, val:0,  ref:0,  sign:-1},
+  {id:"j3", nm:"Coude",                col:"--j3", min:0, max:180, val:0, ref:0, sign: 1},
+  {id:"j4", nm:"Poignet — inclinaison",col:"--j4", min:0, max:180, val:0, ref:0, sign:-1},
+  {id:"j5", nm:"Poignet — rotation",   col:"--j5", min:0, max:180, val:90, ref:90, sign: 1}
+];
+function gAng(J, servo){ return J.sign * ((servo === undefined ? J.val : servo) - J.ref); }
+
+var graspZ = GRASP_Z0;   // hauteur du centre des mors en pose CAO (mm)
+var ouverture = 0;       // ecartement total des mors (mm)
+
+// ---------- decodage geometrie ----------
+function decode(b64){
+  var bin = atob(b64), n = bin.length, u8 = new Uint8Array(n), i;
+  for(i=0;i<n;i++) u8[i] = bin.charCodeAt(i);
+  var i16 = new Int16Array(u8.buffer), s = window.GEO_SCALE;
+  var f32 = new Float32Array(i16.length);
+  for(i=0;i<i16.length;i++) f32[i] = i16[i]/s;
+  return f32;
+}
+function meshOf(key, color){
+  var g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.BufferAttribute(decode(window.GEO[key]), 3));
+  g.computeVertexNormals();
+  var m = new THREE.MeshStandardMaterial({color:color, roughness:0.62, metalness:0.12, flatShading:true});
+  var mesh = new THREE.Mesh(g, m);
+  mesh.castShadow = false;
+  return mesh;
+}
+
+// ---------- scene ----------
+var cv = document.getElementById("cv");
+var renderer = new THREE.WebGLRenderer({canvas:cv, antialias:true, alpha:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio||1, 2));
+var scene = new THREE.Scene();
+var camera = new THREE.PerspectiveCamera(42, 1, 1, 5000);
+camera.up.set(0,0,1);
+
+function css(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+function isDark(){
+  var r = document.documentElement.getAttribute("data-theme");
+  if(r === "dark") return true;
+  if(r === "light") return false;
+  return matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404852, 0.75));
+var d1 = new THREE.DirectionalLight(0xffffff, 0.72); d1.position.set(260, -340, 420); scene.add(d1);
+var d2 = new THREE.DirectionalLight(0xffffff, 0.30); d2.position.set(-320, 260, 140); scene.add(d2);
+
+// sol + reperes
+var world = new THREE.Group(); scene.add(world);
+var grid = new THREE.GridHelper(600, 30);
+grid.rotation.x = Math.PI/2; grid.position.set(BASE.x, BASE.y, 0.1);
+world.add(grid);
+
+var ringGrp = new THREE.Group(); world.add(ringGrp);
+function ring(r, col){
+  var pts = [], i;
+  for(i=0;i<=120;i++){ var a=i/120*Math.PI*2; pts.push(new THREE.Vector3(BASE.x+r*Math.cos(a), BASE.y+r*Math.sin(a), 0.4)); }
+  var g = new THREE.BufferGeometry().setFromPoints(pts);
+  return new THREE.Line(g, new THREE.LineBasicMaterial({color:col}));
+}
+
+// chaine cinematique
+var gBase = new THREE.Group();  world.add(gBase);
+var iBase = new THREE.Group();  gBase.add(iBase);
+gBase.position.set(BASE.x, BASE.y, 0); iBase.position.set(-BASE.x, -BASE.y, 0);
+
+var gSh = new THREE.Group(); var iSh = new THREE.Group(); gSh.add(iSh); iBase.add(gSh);
+gSh.position.set(SHOULD.x, 0, SHOULD.z); iSh.position.set(-SHOULD.x, 0, -SHOULD.z);
+
+var gEl = new THREE.Group(); var iEl = new THREE.Group(); gEl.add(iEl); iSh.add(gEl);
+gEl.position.set(ELBOW.x, 0, ELBOW.z); iEl.position.set(-ELBOW.x, 0, -ELBOW.z);
+
+var gWr = new THREE.Group(); var iWr = new THREE.Group(); gWr.add(iWr); iEl.add(gWr);
+gWr.position.set(WRIST.x, 0, WRIST.z); iWr.position.set(-WRIST.x, 0, -WRIST.z);
+
+// rotation du poignet : axe vertical (local Z) passant par (ROT.x, ROT.y)
+var gRo = new THREE.Group(); var iRo = new THREE.Group(); gRo.add(iRo); iWr.add(gRo);
+gRo.position.set(ROT.x, ROT.y, 0); iRo.position.set(-ROT.x, -ROT.y, 0);
+
+// mors : translation symetrique le long de Y
+var gMa = new THREE.Group(), gMb = new THREE.Group();
+iRo.add(gMa); iRo.add(gMb);
+
+// marqueur TCP, sur l'axe de rotation, au centre des mors
+var tcpNode = new THREE.Group(); iRo.add(tcpNode);
+var tcpBall = new THREE.Mesh(new THREE.SphereGeometry(5, 20, 14),
+  new THREE.MeshStandardMaterial({color:0xff5522, roughness:0.4, emissive:0x441100}));
+tcpNode.add(tcpBall);
+
+// axes de rotation materialises
+var axisLines = [];
+function axisLine(parent, px, pz, dir, col, len){
+  var g = new THREE.BufferGeometry();
+  var a, b;
+  if(dir === "z"){ a = new THREE.Vector3(px, pz, -len); b = new THREE.Vector3(px, pz, len); }
+  else { a = new THREE.Vector3(px, -len, pz); b = new THREE.Vector3(px, len, pz); }
+  g.setFromPoints([a,b]);
+  var l = new THREE.Line(g, new THREE.LineBasicMaterial({color:col}));
+  parent.add(l); axisLines.push(l);
+  return l;
+}
+
+// boitier support (non modelise en CAO : volume 170 x 100 x 70 sous le couvercle)
+var boxMat = new THREE.MeshStandardMaterial({color:0x8e979d, roughness:0.9, metalness:0,
+  transparent:true, opacity:0.32});
+var boitier = new THREE.Mesh(new THREE.BoxGeometry(170, 100, 70), boxMat);
+boitier.position.set(85, 50, 35); world.add(boitier);
+var boitierEdge = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(170, 100, 70)),
+  new THREE.LineBasicMaterial({color:0x6d767c}));
+boitierEdge.position.copy(boitier.position); world.add(boitierEdge);
+
+var parts = {};
+function build(){
+  var body = isDark() ? 0x9aa6ad : 0xb9c2c8;
+  var alt  = isDark() ? 0x7d8990 : 0xa6b0b7;
+
+  parts.couvercle = meshOf("couvercle", alt);   world.add(parts.couvercle);
+  parts.support   = meshOf("support",   body);  iBase.add(parts.support);
+  parts.epaule    = meshOf("epaule",    body);  iBase.add(parts.epaule);
+  parts.bras      = meshOf("bras",      body);  iSh.add(parts.bras);
+  parts.avantbras = meshOf("avantbras", body);  iEl.add(parts.avantbras);
+  parts.poignet   = meshOf("poignet",   body);  iWr.add(parts.poignet);
+  parts.pince     = meshOf("pince",     alt);   iRo.add(parts.pince);
+  parts.morsa     = meshOf("morsa",     body);  gMa.add(parts.morsa);
+  parts.morsb     = meshOf("morsb",     body);  gMb.add(parts.morsb);
+
+  axisLine(iBase, BASE.x, BASE.y, "z", 0x11aaaa, 90);
+  axisLine(iSh,   SHOULD.x, SHOULD.z, "y", 0x3377cc, 70);
+  axisLine(iEl,   ELBOW.x,  ELBOW.z,  "y", 0xaa55cc, 70);
+  axisLine(iWr,   WRIST.x,  WRIST.z,  "y", 0xcc6611, 70);
+  axisLine(iRo,   ROT.x,    ROT.y,    "z", 0xcc2266, 60);
+
+  ringGrp.add(ring(250, 0x4a9a96));
+  ringGrp.add(ring(300, 0x8a6a3a));
+}
+
+// ---------- orbite maison ----------
+var target = new THREE.Vector3(95, BASE.y, 135);
+var cam = {r:660, th:-1.02, ph:1.14};
+function place(){
+  var sp = Math.sin(cam.ph), cp = Math.cos(cam.ph);
+  camera.position.set(
+    target.x + cam.r*sp*Math.cos(cam.th),
+    target.y + cam.r*sp*Math.sin(cam.th),
+    target.z + cam.r*cp);
+  camera.lookAt(target);
+}
+var drag = null;
+function ptr(e){ return {x:e.clientX, y:e.clientY, b:e.button, s:e.shiftKey}; }
+cv.addEventListener("pointerdown", function(e){
+  cv.setPointerCapture(e.pointerId);
+  drag = {p:ptr(e), pan:(e.button===2 || e.shiftKey)};
+  spin = false; syncSpin();
+});
+cv.addEventListener("pointermove", function(e){
+  if(!drag) return;
+  var dx = e.clientX - drag.p.x, dy = e.clientY - drag.p.y;
+  if(drag.pan){
+    var right = new THREE.Vector3().crossVectors(new THREE.Vector3(0,0,1),
+      new THREE.Vector3().subVectors(camera.position, target)).normalize();
+    var up = new THREE.Vector3().crossVectors(
+      new THREE.Vector3().subVectors(camera.position, target), right).normalize();
+    var k = cam.r * 0.0016;
+    target.addScaledVector(right, -dx*k);
+    target.addScaledVector(up,   -dy*k);
+  } else {
+    cam.th -= dx*0.007;
+    cam.ph = Math.max(0.08, Math.min(Math.PI-0.08, cam.ph - dy*0.007));
+  }
+  drag.p = ptr(e); place();
+});
+function endDrag(e){ if(drag){ try{cv.releasePointerCapture(e.pointerId);}catch(_){} } drag = null; }
+cv.addEventListener("pointerup", endDrag);
+cv.addEventListener("pointercancel", endDrag);
+cv.addEventListener("contextmenu", function(e){ e.preventDefault(); });
+cv.addEventListener("wheel", function(e){
+  e.preventDefault();
+  cam.r = Math.max(140, Math.min(1800, cam.r * (1 + Math.sign(e.deltaY)*0.11)));
+  place();
+}, {passive:false});
+
+// pincement tactile
+var touches = {};
+cv.addEventListener("pointerdown", function(e){ if(e.pointerType==="touch") touches[e.pointerId]=e; });
+cv.addEventListener("pointermove", function(e){
+  if(e.pointerType!=="touch") return;
+  var ks = Object.keys(touches);
+  if(ks.length===2 && touches[e.pointerId]){
+    var prev = touches[e.pointerId]; touches[e.pointerId] = e;
+    var o = touches[ks[0]===String(e.pointerId)?ks[1]:ks[0]];
+    var d0 = Math.hypot(prev.clientX-o.clientX, prev.clientY-o.clientY);
+    var d1 = Math.hypot(e.clientX-o.clientX, e.clientY-o.clientY);
+    if(d0>0){ cam.r = Math.max(140, Math.min(1800, cam.r * d0/d1)); place(); }
+    drag = null;
+  } else if(touches[e.pointerId]) touches[e.pointerId] = e;
+});
+function dropTouch(e){ delete touches[e.pointerId]; }
+cv.addEventListener("pointerup", dropTouch);
+cv.addEventListener("pointercancel", dropTouch);
+
+// ---------- cinematique directe ----------
+var D = Math.PI/180;
+function rotY2(px, pz, cx, cz, a){
+  var ca = Math.cos(a), sa = Math.sin(a), ux = px-cx, uz = pz-cz;
+  return [cx + ux*ca + uz*sa, cz - ux*sa + uz*ca];
+}
+function fk(q, gz){
+  // q = angles geometriques en degres ; gz = hauteur du centre des mors (pose CAO)
+  var a2 = q[1]*D, a3 = q[2]*D, a4 = q[3]*D, a1 = q[0]*D;
+  var e = rotY2(ELBOW.x, ELBOW.z, SHOULD.x, SHOULD.z, a2);
+  var w0 = rotY2(WRIST.x, WRIST.z, ELBOW.x, ELBOW.z, a3);
+  var w  = rotY2(w0[0], w0[1], SHOULD.x, SHOULD.z, a2);
+  // le TCP est sur l'axe de rotation du poignet : la rotation j5 ne le deplace pas
+  var t0 = rotY2(ROT.x, gz, WRIST.x, WRIST.z, a4);
+  var t1 = rotY2(t0[0], t0[1], ELBOW.x, ELBOW.z, a3);
+  var t2 = rotY2(t1[0], t1[1], SHOULD.x, SHOULD.z, a2);
+  var ca = Math.cos(a1), sa = Math.sin(a1);
+  function world(sx, sz){
+    var ux = sx - BASE.x;
+    return {x: BASE.x + ux*ca, y: BASE.y + ux*sa, z: sz};
+  }
+  var W = world(t2[0], t2[1]);
+  return {
+    x: W.x, y: W.y, z: W.z, r: t2[0]-BASE.x,
+    elbow:e, wrist:w, sag:[t2[0], t2[1]],
+    elbowW: world(e[0], e[1]), wristW: world(w[0], w[1])
+  };
+}
+// un point heurte-t-il le couvercle ?
+function hitsLid(p){
+  return p.z < TABLE_Z && p.x > LID.x0 && p.x < LID.x1 && p.y > LID.y0 && p.y < LID.y1;
+}
+
+// ---------- interface axes ----------
+var jwrap = document.getElementById("joints");
+JOINTS.forEach(function(J){
+  var d = document.createElement("div");
+  d.className = "joint";
+  d.style.setProperty("--jc", "var(" + J.col + ")");
+  d.innerHTML =
+    '<div class="top"><span class="nm">'+J.nm+'</span>'+
+      '<span class="dlt" id="d_'+J.id+'">Δ 0°</span>'+
+      '<span class="val" id="v_'+J.id+'">90,0°</span></div>'+
+    '<input type="range" id="s_'+J.id+'" min="'+J.min+'" max="'+J.max+'" step="0.1" value="'+J.val+'" aria-label="angle servo '+J.nm+'">'+
+    '<div class="lim"><input type="number" id="lo_'+J.id+'" value="'+J.min+'" step="5" min="0" max="180" aria-label="butée basse '+J.nm+'">'+
+      '<span>butées servo °</span>'+
+      '<input type="number" id="hi_'+J.id+'" value="'+J.max+'" step="5" min="0" max="180" aria-label="butée haute '+J.nm+'"></div>'+
+    '<div class="lim"><input type="number" id="rf_'+J.id+'" value="'+J.ref+'" step="5" min="0" max="180" aria-label="référence CAO '+J.nm+'">'+
+      '<span>réf. pose CAO</span>'+
+      '<button type="button" class="inv" id="sg_'+J.id+'">sens '+(J.sign>0?"+":"−")+'</button></div>';
+  jwrap.appendChild(d);
+});
+
+function qg(){ return JOINTS.map(function(J){ return gAng(J); }); }
+var blockOn = true, blockedAt = null;
+
+function applyPose(){
+  var a = qg();
+  gBase.rotation.z = a[0]*D;
+  gSh.rotation.y   = a[1]*D;
+  gEl.rotation.y   = a[2]*D;
+  gWr.rotation.y   = a[3]*D;
+  gRo.rotation.z   = a[4]*D;
+  gMa.position.y = -ouverture/2;
+  gMb.position.y =  ouverture/2;
+  tcpNode.position.set(ROT.x, ROT.y, graspZ);
+
+  var p = fk(a, graspZ);
+  document.getElementById("tx").textContent = p.x.toFixed(1);
+  document.getElementById("ty").textContent = p.y.toFixed(1);
+  document.getElementById("tz").textContent = p.z.toFixed(1);
+
+  var R = Math.abs(p.r), st = document.getElementById("status");
+  var msg, cls = "";
+  var hit = collide(a, 1);
+  if(hit){
+    msg = "Collision : " + hit; cls = "bad";
+  } else if(blockedAt){
+    msg = "Butée de collision — " + blockedAt.toLowerCase() + " arrêté au contact"; cls = "warn";
+  } else if(R > 300){
+    msg = "R = " + R.toFixed(0) + " mm — au-delà de la portée visée"; cls = "warn";
+  } else if(R < 80){
+    msg = "R = " + R.toFixed(0) + " mm — trop près de l'axe"; cls = "warn";
+  } else {
+    msg = "R = " + R.toFixed(0) + " mm · hauteur utile " + (p.z - TABLE_Z).toFixed(0) + " mm";
+  }
+  st.textContent = msg; st.className = cls;
+  document.getElementById("sub").textContent =
+    "servo " + JOINTS.map(function(J){ return J.val.toFixed(0)+"°"; }).join(" / ");
+  drawReach(p);
+}
+
+JOINTS.forEach(function(J){
+  var s  = document.getElementById("s_"+J.id),
+      v  = document.getElementById("v_"+J.id),
+      dl = document.getElementById("d_"+J.id),
+      lo = document.getElementById("lo_"+J.id),
+      hi = document.getElementById("hi_"+J.id),
+      rf = document.getElementById("rf_"+J.id),
+      sg = document.getElementById("sg_"+J.id);
+  function upd(noBlock){
+    var want = parseFloat(s.value), prev = J.val;
+    J.val = want;
+    blockedAt = null;
+    // butée de collision : on s'arrête au contact au lieu de le traverser
+    if(blockOn && !noBlock && want !== prev && collide(qg(), 1)){
+      J.val = prev;
+      if(!collide(qg(), 1)){
+        var lo = prev, hi = want, mid;
+        for(var it=0; it<14; it++){
+          mid = (lo + hi)/2; J.val = mid;
+          if(collide(qg(), 1)) hi = mid; else lo = mid;
+        }
+        // arrondir du côté sûr : le curseur recale sur son pas
+        J.val = (want > prev ? Math.floor(lo*10) : Math.ceil(lo*10))/10;
+        if(collide(qg(), 1)) J.val = prev;
+        blockedAt = J.nm;
+      } else {
+        J.val = want;   // la pose de départ touchait déjà : on laisse passer
+      }
+      s.value = J.val;
+    }
+    v.textContent = J.val.toFixed(1).replace(".", ",") + "°";
+    var g = gAng(J);
+    dl.textContent = "Δ " + (g >= 0 ? "+" : "−") + Math.abs(g).toFixed(0) + "°";
+    applyPose();
+  }
+  J.refresh = upd;
+  s.addEventListener("input", function(){ spin=false; syncSpin(); upd(); });
+  function lim(){
+    J.min = parseFloat(lo.value); J.max = parseFloat(hi.value);
+    if(!(J.max > J.min)){ J.max = J.min + 1; hi.value = J.max; }
+    s.min = J.min; s.max = J.max;
+    if(J.val < J.min) s.value = J.min;
+    if(J.val > J.max) s.value = J.max;
+    envDirty = true; upd();
+  }
+  lo.addEventListener("change", lim);
+  hi.addEventListener("change", lim);
+  rf.addEventListener("change", function(){
+    J.ref = parseFloat(rf.value) || 0; envDirty = true; upd();
+  });
+  sg.addEventListener("click", function(){
+    J.sign = -J.sign;
+    sg.textContent = "sens " + (J.sign > 0 ? "+" : "−");
+    envDirty = true; upd();
+  });
+});
+
+document.getElementById("tL").addEventListener("change", function(){
+  graspZ = parseFloat(this.value) || GRASP_Z0;
+  envDirty = true; applyPose();
+});
+document.getElementById("tOuv").addEventListener("input", function(){
+  ouverture = parseFloat(this.value) || 0;
+  document.getElementById("ouvVal").textContent = ouverture.toFixed(0) + " mm";
+  applyPose();
+});
+
+document.querySelectorAll("[data-pose]").forEach(function(b){
+  b.addEventListener("click", function(){
+    var vals = b.getAttribute("data-pose").split(",").map(Number);
+    spin = false; syncSpin();
+    JOINTS.forEach(function(J,i){
+      var val = Math.max(J.min, Math.min(J.max, vals[i]));
+      document.getElementById("s_"+J.id).value = val;
+      J.refresh(true);   // une pose enregistrée s'applique d'un bloc
+    });
+  });
+});
+
+var bAxes = document.getElementById("bAxes"), bEnv = document.getElementById("bEnv"),
+    bSpin = document.getElementById("bSpin"), spin = false;
+bAxes.addEventListener("click", function(){
+  var on = bAxes.getAttribute("aria-pressed") !== "true";
+  bAxes.setAttribute("aria-pressed", on);
+  axisLines.forEach(function(l){ l.visible = on; });
+  tcpBall.visible = on;
+});
+bEnv.addEventListener("click", function(){
+  var on = bEnv.getAttribute("aria-pressed") !== "true";
+  bEnv.setAttribute("aria-pressed", on); ringGrp.visible = on;
+});
+function syncSpin(){ if(bSpin) bSpin.setAttribute("aria-pressed", spin ? "true" : "false"); }
+bSpin.addEventListener("click", function(){ spin = !spin; syncSpin(); });
+
+var bBlock = document.getElementById("bBlock");
+bBlock.addEventListener("click", function(){
+  blockOn = bBlock.getAttribute("aria-pressed") !== "true";
+  bBlock.setAttribute("aria-pressed", blockOn);
+  blockedAt = null; applyPose();
+});
+
+document.getElementById("bFit").addEventListener("click", function(){
+  var box = new THREE.Box3();
+  ["couvercle","support","epaule","bras","avantbras","poignet","pince"].forEach(function(k){
+    if(parts[k]) box.expandByObject(parts[k]);
+  });
+  if(box.isEmpty()) return;
+  var sph = box.getBoundingSphere(new THREE.Sphere());
+  target.copy(sph.center);
+  cam.r = Math.max(220, sph.radius * 2.6);
+  place();
+});
+
+// ---------- diagramme de portee ----------
+var rcv = document.getElementById("reach"), rctx = rcv.getContext("2d");
+var envDirty = true, envPts = null, envVert = null;
+
+var LID_FWD = LID.x1 - BASE.x, LID_BACK = BASE.x - LID.x0;
+
+// ---------- collision maillage a maillage ----------
+// Chaque piece a un nuage de points de surface et un volume plein erode.
+// Un point de surface d'une piece tombant dans le volume d'une autre = interpenetration.
+function b64bytes(s){
+  var bin = atob(s), n = bin.length, u = new Uint8Array(n);
+  for(var i=0;i<n;i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+var CP = {}, LINK_ORDER = ["L0","L1","L2","L3","L4","L5","L6","L7"];
+var LINK_NAME = {L0:"le couvercle", L1:"l'épaule", L2:"le bras",
+                 L3:"l'avant-bras", L4:"le poignet", L5:"le bâti de pince",
+                 L6:"un mors", L7:"un mors"};
+(function(){
+  var S = window.COL_SCALE;
+  LINK_ORDER.forEach(function(k){
+    var o = window.COL[k], raw = b64bytes(o.p);
+    var i16 = new Int16Array(raw.buffer, raw.byteOffset, o.n*3);
+    var pts = new Float32Array(o.n*3);
+    for(var i=0;i<o.n*3;i++) pts[i] = i16[i]/S;
+    CP[k] = {n:o.n, pts:pts, lo:o.lo, dim:o.dim, bits:b64bytes(o.v)};
+  });
+})();
+var VOX = window.COL_VOX;
+
+function solidAt(C, x, y, z){
+  var ix = Math.floor((x - C.lo[0])/VOX); if(ix < 0 || ix >= C.dim[0]) return 0;
+  var iy = Math.floor((y - C.lo[1])/VOX); if(iy < 0 || iy >= C.dim[1]) return 0;
+  var iz = Math.floor((z - C.lo[2])/VOX); if(iz < 0 || iz >= C.dim[2]) return 0;
+  var idx = (ix*C.dim[1] + iy)*C.dim[2] + iz;
+  return (C.bits[idx >> 3] >> (idx & 7)) & 1;
+}
+
+// matrices de chaque maillon, sans allocation (appele des milliers de fois)
+var _MP = {}, _pv = new THREE.Matrix4();
+LINK_ORDER.forEach(function(k){ _MP[k] = new THREE.Matrix4(); });
+function pivotInto(out, axis, cx, cy, cz, deg){
+  if(axis === "y") out.makeRotationY(deg*D); else out.makeRotationZ(deg*D);
+  var e = out.elements;
+  e[12] = cx - (e[0]*cx + e[4]*cy + e[8]*cz);
+  e[13] = cy - (e[1]*cx + e[5]*cy + e[9]*cz);
+  e[14] = cz - (e[2]*cx + e[6]*cy + e[10]*cz);
+  return out;
+}
+function linkMatrices(a){
+  _MP.L0.identity();
+  pivotInto(_MP.L1, "z", BASE.x, BASE.y, 0, a[0]);
+  _MP.L2.multiplyMatrices(_MP.L1, pivotInto(_pv, "y", SHOULD.x, 0, SHOULD.z, a[1]));
+  _MP.L3.multiplyMatrices(_MP.L2, pivotInto(_pv, "y", ELBOW.x,  0, ELBOW.z,  a[2]));
+  _MP.L4.multiplyMatrices(_MP.L3, pivotInto(_pv, "y", WRIST.x,  0, WRIST.z,  a[3]));
+  _MP.L5.multiplyMatrices(_MP.L4, pivotInto(_pv, "z", ROT.x, ROT.y, 0, a[4]));
+  var dy = ouverture/2;   // mors en L : le doigt traverse, la translation est inversee
+  _MP.L6.multiplyMatrices(_MP.L5, _pv.makeTranslation(0, -dy, 0));
+  _MP.L7.multiplyMatrices(_MP.L5, _pv.makeTranslation(0,  dy, 0));
+  return _MP;
+}
+
+// paires testees : tout sauf une piece avec elle-meme
+var PAIRS = [["L0","L2"],["L0","L3"],["L0","L4"],["L0","L5"],["L0","L6"],["L0","L7"],
+             ["L1","L2"],["L1","L3"],["L1","L4"],["L1","L5"],["L1","L6"],["L1","L7"],
+             ["L2","L3"],["L2","L4"],["L2","L5"],["L2","L6"],["L2","L7"],
+             ["L3","L4"],["L3","L5"],["L3","L6"],["L3","L7"],
+             ["L4","L5"],["L4","L6"],["L4","L7"]];
+var BOX_H = 70;   // boitier sous le couvercle
+
+var _rel = new THREE.Matrix4();
+function countInside(A, B, MA, MB, stride){
+  _rel.copy(MB).invert().multiply(MA);
+  var e = _rel.elements, P = CP[A].pts, C = CP[B], n = CP[A].n, hits = 0;
+  for(var i=0;i<n;i+=stride){
+    var x = P[i*3], y = P[i*3+1], z = P[i*3+2];
+    var lx = e[0]*x + e[4]*y + e[8]*z  + e[12];
+    var ly = e[1]*x + e[5]*y + e[9]*z  + e[13];
+    var lz = e[2]*x + e[6]*y + e[10]*z + e[14];
+    if(solidAt(C, lx, ly, lz)){ hits++; if(hits >= 2) return hits; }
+  }
+  return hits;
+}
+// renvoie null si la pose est valide, sinon le libelle du premier contact
+function collide(a, stride){
+  stride = stride || 1;
+  var M = linkMatrices(a), i, p;
+  for(i=0;i<PAIRS.length;i++){
+    p = PAIRS[i];
+    if(countInside(p[0], p[1], M[p[0]], M[p[1]], stride) >= 2 ||
+       countInside(p[1], p[0], M[p[1]], M[p[0]], stride) >= 2){
+      return LINK_NAME[p[1]] + " et " + LINK_NAME[p[0]];
+    }
+  }
+  // boitier et table
+  for(i=2;i<8;i++){
+    var k = LINK_ORDER[i], e = M[k].elements, P = CP[k].pts, n = CP[k].n, nb = 0, nt = 0;
+    for(var j=0;j<n;j+=stride){
+      var x = P[j*3], y = P[j*3+1], z = P[j*3+2];
+      var wx = e[0]*x + e[4]*y + e[8]*z  + e[12];
+      var wy = e[1]*x + e[5]*y + e[9]*z  + e[13];
+      var wz = e[2]*x + e[6]*y + e[10]*z + e[14];
+      if(wz < 0 && ++nt >= 2) return LINK_NAME[k] + " et la table";
+      if(wz < BOX_H && wx > LID.x0 && wx < LID.x1 && wy > LID.y0 && wy < LID.y1
+         && ++nb >= 2) return LINK_NAME[k] + " et le boîtier";
+    }
+  }
+  return null;
+}
+
+function computeEnv(){
+  var all = [], vert = [], i, j, k;
+  var J2 = JOINTS[1], J3 = JOINTS[2], J4 = JOINTS[3];
+  var N2 = 32, N3 = 32, N4 = 9, SK = 7;   // SK = pas d'echantillonnage des nuages
+  for(i=0;i<N2;i++){
+    var t2 = gAng(J2, J2.min + (J2.max-J2.min)*i/(N2-1));
+    for(j=0;j<N3;j++){
+      var t3 = gAng(J3, J3.min + (J3.max-J3.min)*j/(N3-1));
+      for(k=0;k<N4;k++){
+        var t4 = gAng(J4, J4.min + (J4.max-J4.min)*k/(N4-1));
+        if(collide([0,t2,t3,t4,0], SK)) continue;
+        var p = fk([0,t2,t3,t4,0], graspZ);
+        all.push(p.sag[0]-BASE.x, p.sag[1]);
+      }
+      // pince verticale : l'inclinaison est imposee par t2 + t3 + t4 = 0
+      var need = -(t2 + t3);
+      var sNeed = J4.ref + need / J4.sign;
+      if(sNeed >= J4.min && sNeed <= J4.max && !collide([0,t2,t3,need,0], SK)){
+        var pv = fk([0,t2,t3,need,0], graspZ);
+        vert.push(pv.sag[0]-BASE.x, pv.sag[1]);
+      }
+    }
+  }
+  envPts = new Float32Array(all);
+  envVert = new Float32Array(vert);
+}
+
+function drawReach(cur){
+  if(envDirty){ computeEnv(); envDirty = false; }
+  var W = rcv.width, H = rcv.height;
+  var Rmin = -390, Rmax = 210, Zmin = -30, Zmax = 420;
+  function sx(r){ return (r - Rmin)/(Rmax-Rmin)*W; }
+  function sy(z){ return H - (z - Zmin)/(Zmax-Zmin)*H; }
+
+  rctx.clearRect(0,0,W,H);
+  rctx.fillStyle = css("--panel-2"); rctx.fillRect(0,0,W,H);
+
+  // nuage atteignable, toutes orientations
+  var i;
+  rctx.fillStyle = isDark() ? "rgba(79,207,198,0.13)" : "rgba(13,109,107,0.11)";
+  for(i=0;i<envPts.length;i+=2){
+    rctx.fillRect(sx(envPts[i])-1.6, sy(envPts[i+1])-1.6, 3.2, 3.2);
+  }
+  // sous-ensemble avec la pince verticale
+  rctx.fillStyle = isDark() ? "rgba(238,135,173,0.62)" : "rgba(157,43,94,0.55)";
+  for(i=0;i<envVert.length;i+=2){
+    rctx.fillRect(sx(envVert[i])-1.9, sy(envVert[i+1])-1.9, 3.8, 3.8);
+  }
+
+  // bande de prise : 0 a 40 mm au-dessus du plateau
+  rctx.fillStyle = isDark() ? "rgba(229,148,71,0.13)" : "rgba(177,86,12,0.10)";
+  rctx.fillRect(0, sy(TABLE_Z+40), W, sy(TABLE_Z)-sy(TABLE_Z+40));
+
+  // emprise du couvercle
+  rctx.fillStyle = isDark() ? "rgba(255,255,255,0.07)" : "rgba(0,0,0,0.07)";
+  rctx.fillRect(sx(-LID_BACK), sy(TABLE_Z), sx(LID_FWD)-sx(-LID_BACK), sy(0)-sy(TABLE_Z));
+
+  // plan de travail
+  rctx.strokeStyle = css("--fg-faint"); rctx.lineWidth = 1.5;
+  rctx.beginPath(); rctx.moveTo(0, sy(TABLE_Z)); rctx.lineTo(W, sy(TABLE_Z)); rctx.stroke();
+  // axe de base
+  rctx.setLineDash([5,5]);
+  rctx.beginPath(); rctx.moveTo(sx(0), 0); rctx.lineTo(sx(0), H); rctx.stroke();
+  rctx.setLineDash([]);
+
+  // reperes 250 / 300 mm
+  [[250, css("--accent")], [300, css("--warn")]].forEach(function(t){
+    rctx.strokeStyle = t[1]; rctx.lineWidth = 1;
+    rctx.beginPath(); rctx.arc(sx(0), sy(TABLE_Z), sx(t[0])-sx(0), 0, Math.PI*2); rctx.stroke();
+  });
+
+  // graduations
+  rctx.fillStyle = css("--fg-faint");
+  rctx.font = "500 18px 'IBM Plex Mono', monospace";
+  rctx.textAlign = "center";
+  [-300,-200,-100,0,100,200].forEach(function(r){ rctx.fillText(r, sx(r), H-7); });
+  rctx.textAlign = "left";
+  [0,100,200,300,400].forEach(function(z){ rctx.fillText(z, 5, sy(z)-5); });
+  rctx.fillStyle = css("--fg-dim");
+  rctx.textAlign = "right";
+  rctx.fillText("R mm", W-6, H-7);
+
+  // pose courante
+  var cx = sx(cur.sag[0]-BASE.x), cy = sy(cur.sag[1]);
+  rctx.strokeStyle = css("--fg"); rctx.lineWidth = 2.5;
+  rctx.beginPath();
+  rctx.moveTo(sx(SHOULD.x-BASE.x), sy(SHOULD.z));
+  rctx.lineTo(sx(cur.elbow[0]-BASE.x), sy(cur.elbow[1]));
+  rctx.lineTo(sx(cur.wrist[0]-BASE.x), sy(cur.wrist[1]));
+  rctx.lineTo(cx, cy);
+  rctx.stroke();
+  rctx.fillStyle = "#ff5522";
+  rctx.beginPath(); rctx.arc(cx, cy, 6, 0, Math.PI*2); rctx.fill();
+}
+
+// ---------- boucle ----------
+function resize(){
+  var r = cv.getBoundingClientRect();
+  if(r.width < 2 || r.height < 2) return;
+  renderer.setSize(r.width, r.height, false);
+  camera.aspect = r.width / r.height;
+  camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize);
+
+var last = 0;
+function loop(t){
+  if(spin && last){ cam.th += (t-last)*0.00022; place(); }
+  last = t;
+  renderer.render(scene, camera);
+  requestAnimationFrame(loop);
+}
+
+// ---------- suivi direct ----------
+// Si la page est servie par la carte, /etat rend la pose courante du bras et
+// le simulateur la rejoue. Ouverte autrement, /etat n'existe pas : la page
+// reste pilotable au curseur.
+var LIVE = false, liveDernier = 0;
+function appliquerServos(vals, ouv){
+  var i, J;
+  for(i=0;i<JOINTS.length && i<vals.length;i++){
+    J = JOINTS[i];
+    J.val = Math.max(J.min, Math.min(J.max, vals[i]));
+    var s = document.getElementById("s_"+J.id);
+    s.value = J.val;
+    document.getElementById("v_"+J.id).textContent = J.val.toFixed(1).replace(".", ",") + "°";
+    var g = gAng(J);
+    document.getElementById("d_"+J.id).textContent =
+      "Δ " + (g >= 0 ? "+" : "−") + Math.abs(g).toFixed(0) + "°";
+  }
+  if(typeof ouv === "number"){
+    ouverture = Math.max(0, Math.min(40, ouv));
+    document.getElementById("tOuv").value = ouverture;
+    document.getElementById("ouvVal").textContent = ouverture.toFixed(0) + " mm";
+  }
+  blockedAt = null;
+  applyPose();
+}
+function sondeLive(){
+  fetch("etat", {cache:"no-store"}).then(function(r){
+    return r.ok ? r.json() : null;
+  }).then(function(e){
+    if(!e || !e.servos) return;
+    liveDernier = Date.now();
+    appliquerServos(e.servos, e.ouverture);
+    var el = document.getElementById("liveEtat");
+    el.textContent = e.source ? e.source : "bras connecté";
+    document.getElementById("live").classList.remove("perdu");
+  }).catch(function(){
+    if(LIVE && Date.now() - liveDernier > 2500){
+      document.getElementById("liveEtat").textContent = "signal perdu";
+      document.getElementById("live").classList.add("perdu");
+    }
+  });
+}
+function demarrerLive(){
+  LIVE = true;
+  spin = false; syncSpin();
+  document.getElementById("live").hidden = false;
+  document.getElementById("rail").classList.add("verrou");
+  setInterval(sondeLive, 100);
+  sondeLive();
+}
+
+function themeSync(){
+  var body = isDark() ? 0x9aa6ad : 0xb9c2c8;
+  var alt  = isDark() ? 0x7d8990 : 0xa6b0b7;
+  if(parts.couvercle) parts.couvercle.material.color.setHex(alt);
+  ["support","epaule","bras","avantbras","poignet"].forEach(function(k){
+    if(parts[k]) parts[k].material.color.setHex(body);
+  });
+  grid.material.opacity = 0.45; grid.material.transparent = true;
+  grid.material.color.setHex(isDark() ? 0x3a454b : 0xb4bdc3);
+  applyPose();
+}
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", themeSync);
+
+try{
+  build();
+  resize(); place(); themeSync();
+  document.getElementById("loading").remove();
+  requestAnimationFrame(loop);
+  fetch("etat", {cache:"no-store"}).then(function(r){
+    if(r.ok) return r.json();
+    throw 0;
+  }).then(function(){ demarrerLive(); }).catch(function(){});
+  setTimeout(resize, 60);
+}catch(err){
+  document.getElementById("loading").textContent = "Erreur : " + err.message;
+}
+
+// Le script de la page est enferme dans une fonction anonyme : rien n'en sort
+// par defaut. On publie ici les seules references dont un module ajoute a
+// besoin, dont un crochet pour etre rappele apres chaque pose.
+window.SIMU = {
+  THREE: THREE, world: world, fk: fk, qg: qg, BASE: BASE, D: D,
+  get graspZ(){ return graspZ; },
+  get ouverture(){ return ouverture; },
+  surPose: function(f){
+    var o = applyPose;
+    applyPose = function(){ o.apply(this, arguments); try{ f(); }catch(e){} };
+    f();
+  }
+};
+})();
+</script>
+<script src="jeu.js"></script>
+
+<div id="vueCam" hidden style="position:fixed;right:14px;bottom:14px;z-index:70;
+ width:330px;max-height:92vh;overflow:auto;background:rgba(14,16,22,.90);border-radius:10px;padding:9px;
+ font:12px/1.45 ui-monospace,Menlo,monospace;color:#e7ecee;
+ box-shadow:0 2px 14px rgba(0,0,0,.4)">
+<img id="vueImg" style="width:100%;border-radius:6px;display:block">
+<table id="vueTab" style="width:100%;border-collapse:collapse;margin-top:7px"></table>
+<div id="molettes" style="margin-top:8px;border-top:1px solid #2a3137;padding-top:7px"></div>
+</div>
+<script>
+(function(){
+  var b = document.getElementById("vueCam"), im = document.getElementById("vueImg"),
+      tb = document.getElementById("vueTab");
+  function tour(){
+    fetch("etat", {cache:"no-store"}).then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(e){
+      if(!e || !e.mesures || !Object.keys(e.mesures).length) return;
+      b.hidden = false;
+      im.src = "camera.jpg?" + Date.now();
+      tb.innerHTML = Object.entries(e.mesures).map(function(kv){
+        return '<tr><td style="padding:1px 4px;color:#9fb0b6">' + kv[0] +
+               '</td><td style="padding:1px 4px;text-align:right;color:#4fcfc6">' +
+               kv[1] + '</td></tr>'; }).join("");
+    }).catch(function(){});
+  }
+  setInterval(tour, 250); tour();
+
+  // Molettes : on pose la valeur dans le programme qui tourne, sans le
+  // relancer. Refaire la calibration a chaque essai rendait tout reglage
+  // fin impraticable.
+  var DEF = [
+    ["ancre_r_mm",     "zone morte rayon",  0, 40, 1, "mm"],
+    ["ancre_z_mm",     "zone morte hauteur",0, 40, 1, "mm"],
+    ["ancre_base_deg", "zone morte base",   0,  6, .1, "\u00b0"],
+    ["zone_morte_deg", "seuil servo",       0,  5, .1, "\u00b0"],
+    ["vitesse_max_deg","vitesse max",       2, 25, .5, "\u00b0/img"],
+    ["base_amplitude", "amplitude base",   20, 70, 1, "\u00b0"],
+    ["r_min",          "rayon mini",       80,200, 5, "mm"],
+    ["r_max",          "rayon maxi",      200,340, 5, "mm"]
+  ];
+  var zone = document.getElementById("molettes"), faits = false;
+  function poser(cle, val){
+    var o = {}; o[cle] = parseFloat(val);
+    fetch("reglage", {method:"POST", headers:{"Content-Type":"application/json"},
+                      body: JSON.stringify(o)}).catch(function(){});
+  }
+  function construire(vals){
+    zone.innerHTML = DEF.map(function(d){
+      var v = vals[d[0]];
+      if(v === undefined) return "";
+      return '<div style="display:flex;align-items:center;gap:6px;margin:2px 0">'+
+        '<span style="flex:0 0 112px;color:#9fb0b6;font-size:11px">'+d[1]+'</span>'+
+        '<input type="range" id="mo_'+d[0]+'" min="'+d[2]+'" max="'+d[3]+
+        '" step="'+d[4]+'" value="'+v+'" style="flex:1;min-width:0">'+
+        '<span id="va_'+d[0]+'" style="flex:0 0 58px;text-align:right;'+
+        'color:#4fcfc6;font-size:11px">'+v+' '+d[5]+'</span></div>';
+    }).join("");
+    DEF.forEach(function(d){
+      var e = document.getElementById("mo_"+d[0]);
+      if(!e) return;
+      e.addEventListener("input", function(){
+        document.getElementById("va_"+d[0]).textContent = e.value+" "+d[5];
+        poser(d[0], e.value);
+      });
+    });
+    faits = true;
+  }
+  var init = setInterval(function(){
+    if(faits){ clearInterval(init); return; }
+    fetch("etat", {cache:"no-store"}).then(function(r){ return r.ok?r.json():null; })
+    .then(function(e){ if(e && e.reglages && Object.keys(e.reglages).length)
+                         construire(e.reglages); }).catch(function(){});
+  }, 500);
+})();
+</script>

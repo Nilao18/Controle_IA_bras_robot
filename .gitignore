@@ -1,0 +1,18 @@
+# Le depot vit dans le dossier personnel : on ignore tout par defaut et on
+# ne reautorise que les fichiers du projet, nommes un par un.
+/*
+!.gitignore
+!bras_*.py
+!bras_params.json
+!bras_collision.json
+!orientation.py
+!analyse.py
+!mesure_profondeur.py
+!viewer/
+!sketch/
+# et dans ces dossiers, pas de dechets
+*.pyc
+__pycache__/
+*.bak
+*.jpg
+*.csv
