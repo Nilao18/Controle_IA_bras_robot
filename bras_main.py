@@ -206,6 +206,13 @@ REGLAGES = {
 
 NOMS = ("base", "epaule", "coude", "inclinaison", "rotation")
 
+# Reglages modifiables depuis la page du simulateur, sans relancer le
+# programme. Refaire la calibration a chaque essai rendait tout reglage fin
+# impraticable : une valeur se juge sur dix prises de jeton, pas sur une.
+MOLETTES = ("ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "zone_morte_deg",
+            "vitesse_max_deg", "base_amplitude", "r_min", "r_max",
+            "x_min", "x_max", "y_min", "y_max")
+
 
 def _borne(v, a, b):
     return a if v < a else (b if v > b else v)
@@ -1186,8 +1193,11 @@ def principal(args) -> int:
     cal = calibrer(main)
 
     print()
+    # Relevee au-dela des bornes courantes : les molettes font varier r_min et
+    # r_max en cours de route, et une table calee sur les valeurs de depart
+    # figerait la course verticale des qu'on les deplace.
     table = table_hauteur(lambda R, z: resoudre(b.base[0] - R, b.base[1], z),
-                          r["r_min"], r["r_max"])
+                          min(r["r_min"], 80.0), max(r["r_max"], 340.0))
 
     def lisseur(seuil):
         return Lisseur(seuil, r["ancre_rattrapage"],
@@ -1199,6 +1209,26 @@ def principal(args) -> int:
     # la pince, elle, va bien avec un passe-bas : son signal est franc
     f_p = UnEuro(1.2, 0.05)
 
+    # Les molettes de la page ne s'affichaient pas : elle les construit a
+    # partir des valeurs publiees par /etat, et personne ne les publiait. On
+    # les pose donc au demarrage, puis on relit ce que la page a deplace.
+    molettes = {k: float(r[k]) for k in MOLETTES}
+    seuils = {"ancre_base_deg": f_base, "ancre_r_mm": f_r, "ancre_z_mm": f_z}
+    if visu:
+        visu.poser_reglages(molettes)
+
+    def relire_molettes():
+        """Applique ce que la page a deplace. Rien a reconstruire : `commandes`
+        et `_limiter` lisent `r` a chaque image, et le seuil d'une ancre est un
+        simple attribut - le modifier preserve son etat, donc aucun saut."""
+        for cle, val in visu.reglages().items():
+            if cle not in molettes or abs(val - molettes[cle]) < 1e-9:
+                continue
+            molettes[cle] = r[cle] = val
+            if cle in seuils:
+                seuils[cle].ancre.seuil = val
+            print("  molette : %s = %g" % (cle, val))
+
     envoyes = None
     recents = []            # moyenne glissante sur les angles envoyes
     derniere_main = 0.0
@@ -1209,6 +1239,7 @@ def principal(args) -> int:
     t0 = time.time()
     prochain_apercu = 0.0
     prochaine_vue = 0.0
+    prochaine_molette = 0.0
 
     print("\nen route. Ctrl+C pour arreter.\n")
     try:
@@ -1216,6 +1247,12 @@ def principal(args) -> int:
             n += 1
             m = main.lire()
             t = time.time()
+
+            # avant le test de presence : on doit pouvoir regler meme la main
+            # hors du cadre, sinon la molette ne repond plus des qu'on lache
+            if visu and t > prochaine_molette:
+                prochaine_molette = t + 0.3
+                relire_molettes()
 
             if m is None:
                 # Pas de main dans l'image : c'est le seul moment ou la
