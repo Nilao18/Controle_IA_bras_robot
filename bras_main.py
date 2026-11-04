@@ -79,6 +79,11 @@ REGLAGES = {
     # distance, en metres, a laquelle correspond la pose de calibration. Les
     # millimetres affiches sont desormais rapportes a elle.
     "ref_distance_m": 0.45,
+
+    # correction de perspective : 0 = desactivee (comportement d'origine),
+    # 1 = active. Reglable en direct depuis la page, pour comparer les deux
+    # sur le meme lancement plutot que de memoire d'une session a l'autre.
+    "deprojection": 0.0,
     # periode d'envoi de l'image camera au simulateur, en secondes. Encoder
     # un JPEG coute quelques millisecondes : a 7 images par seconde on ne peut
     # pas se le permettre a chaque image sans perdre de la cadence.
@@ -209,7 +214,8 @@ NOMS = ("base", "epaule", "coude", "inclinaison", "rotation")
 # Reglages modifiables depuis la page du simulateur, sans relancer le
 # programme. Refaire la calibration a chaque essai rendait tout reglage fin
 # impraticable : une valeur se juge sur dix prises de jeton, pas sur une.
-MOLETTES = ("ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "zone_morte_deg",
+MOLETTES = ("deprojection",
+            "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "zone_morte_deg",
             "vitesse_max_deg", "base_amplitude", "r_min", "r_max",
             "x_min", "x_max", "y_min", "y_max")
 
@@ -946,9 +952,41 @@ def bornes_hauteur(table, rayon):
     return table[-1][1], table[-1][2]
 
 
+def _deprojeter(m: dict, r: dict):
+    """Annule l'etalement de perspective quand la main s'approche.
+
+    Une camera ne mesure pas une position mais un rapport : un point a la
+    position laterale X et a la distance d tombe en pixel (u - cx) = f.X/d.
+    Une main qui avance en ligne droite hors de l'axe optique garde donc X
+    constant pendant que d diminue, et son image derive vers le bord. Le bras
+    part alors en rotation ou en hauteur alors que rien n'a bouge lateralement.
+
+    Retrouver X demande en principe la focale f, donc une calibration au
+    damier. Elle s'annule ici : la distance est elle-meme deduite des travees
+    de la paume, et le facteur d'echelle restant est absorbe par les bornes
+    x_min / x_max du mappage, qui normalisent de toute facon. Il ne reste que
+    le rapport des distances, sans aucune mesure a fournir.
+
+    A la distance de calibration le facteur vaut 1 : comportement strictement
+    identique a l'ancien. L'erreur heritee est celle de l'indice de
+    profondeur, mais multipliee par l'ecart au centre de l'image - nulle sur
+    l'axe, maximale au bord.
+    """
+    x, y = m["x"], m["y"]
+    if not r["deprojection"] or not m.get("distance"):
+        return x, y
+    k = m["distance"] / r["ref_distance_m"]
+    return 0.5 + (x - 0.5) * k, 0.5 + (y - 0.5) * k
+
+
 def commandes(m: dict, cal: dict, r: dict, table=None):
+    # les valeurs corrigees sont rangees dans m pour que le panneau camera
+    # puisse les afficher a cote des brutes, et qu'on voie l'effet en direct
+    mx, my = _deprojeter(m, r)
+    m["x_corr"], m["y_corr"] = mx, my
+
     base = r["base_centre"] + r["base_sens"] * _interp(
-        m["x"], r["x_min"], r["x_max"], -r["base_amplitude"], r["base_amplitude"])
+        mx, r["x_min"], r["x_max"], -r["base_amplitude"], r["base_amplitude"])
 
     # distance en metres, issue de l'ajustement de pose : main pres de la
     # camera -> bras tendu. Aucune correction d'inclinaison a appliquer.
@@ -963,9 +1001,9 @@ def commandes(m: dict, cal: dict, r: dict, table=None):
     # la course verticale suit le rayon : toute la hauteur de l'image sert
     bas, haut = bornes_hauteur(table, rayon)
     if r["z_sens"] > 0:
-        z = _interp(m["y"], r["y_min"], r["y_max"], haut, bas)
+        z = _interp(my, r["y_min"], r["y_max"], haut, bas)
     else:
-        z = _interp(m["y"], r["y_min"], r["y_max"], bas, haut)
+        z = _interp(my, r["y_min"], r["y_max"], bas, haut)
 
     ouverture = _interp(m["pince"], cal["pince_fermee"],
                         cal["pince_ouverte"], 0.0, 40.0)
@@ -1340,6 +1378,8 @@ def principal(args) -> int:
                 prochaine_vue = t + r["periode_vue_s"]
                 visu.publier_image(_vue_annotee(main),
                                    {"x": round(m["x"], 3), "y": round(m["y"], 3),
+                                    "x corrige": round(m.get("x_corr", m["x"]), 3),
+                                    "y corrige": round(m.get("y_corr", m["y"]), 3),
                                     "distance_mm": round(1000 * m["distance"]),
                                     "R_mm": round(cr), "Z_mm": round(cz),
                                     "base_deg": round(cb, 1),
@@ -1400,8 +1440,13 @@ if __name__ == "__main__":
     p.add_argument("--port", type=int, default=8080)
     p.add_argument("--flip", choices=("aucune", "verticale", "horizontale", "180"),
                    default=None, help="orientation de l'image")
+    p.add_argument("--deprojection", action="store_true",
+                   help="demarrer avec la correction de perspective active "
+                        "(reglable ensuite depuis la page)")
     a = p.parse_args()
     if a.flip is not None:
         REGLAGES["flip"] = {"aucune": None, "verticale": 0,
                             "horizontale": 1, "180": -1}[a.flip]
+    if a.deprojection:
+        REGLAGES["deprojection"] = 1.0
     raise SystemExit(principal(a))
