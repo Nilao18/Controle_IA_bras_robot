@@ -1142,7 +1142,10 @@ setInterval(t,200);t();
                 d["x"] = f"{m['x']:.3f}"
                 d["y"] = f"{m['y']:.3f}"
                 d["taille"] = f"{m['taille']:.1f} px"
-                d["ecart / taille"] = f"{m['ecart']/max(m['taille'],1e-6):.2f}"
+                # `lire` rend desormais `pince`, deja normalisee par la taille
+                d["pince"] = f"{m['pince']:.2f}"
+                d["distance"] = f"{1000*m['distance']:.0f} mm" if m.get(
+                    "distance") else "non mesuree"
             if tmin is not None:
                 d["taille vue"] = f"{tmin:.0f} a {tmax:.0f} px"
                 d["amplitude"] = f"x{tmax/max(tmin,1e-6):.2f}"
