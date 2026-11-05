@@ -156,7 +156,17 @@ REGLAGES = {
     "zone_morte_deg": 0.0,
     # moyenne glissante sur les angles envoyes, en images. Meme source : trois
     # images. Elle n'arrondit que les marches laissees par le seuil ci-dessus.
-    "moyenne_servo": 2,
+    # Lissage de sortie, en MILLISECONDES et non en nombre d'images.
+    #
+    # Compte en images, le reglage ment des qu'on change la cadence : trois
+    # images lissaient sur 333 ms a 9 images par seconde et sur 176 ms a 17.
+    # Le retard introduit vaut la moitie de l'etalement de la fenetre, quelle
+    # que soit la cadence - c'est donc en temps qu'il faut l'exprimer pour
+    # qu'il garde le meme sens.
+    #
+    # 120 ms reproduisent le reglage trouve a la main : 3 images a 17 img/s
+    # s'etalent sur 118 ms, soit 59 ms de retard.
+    "lissage_ms": 120.0,
 
     "x_min": 0.20, "x_max": 0.80,
     # pleine hauteur d'image : toute la course verticale du bras tient entre
@@ -258,7 +268,7 @@ MOLETTES = ("deprojection", "cartesien",
             "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "ancre_lat_mm",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
-            "moyenne_servo",
+            "lissage_ms",
             "x_min", "x_max", "y_min", "y_max")
 
 
@@ -1665,7 +1675,7 @@ def principal(args) -> int:
             print("  molette : %s = %g" % (cle, val))
 
     envoyes = None
-    recents = []            # moyenne glissante sur les angles envoyes
+    recents = []            # (instant, pose) sur la fenetre de lissage
     derniere_main = 0.0
     dernier_controle = 0.0
     dernier_expo = 0.0
@@ -1761,9 +1771,12 @@ def principal(args) -> int:
             envoyes = _limiter(sol.servos, envoyes,
                                r["vitesse_max_deg_s"] * dt_cmd,
                                r["zone_morte_deg"])
-            recents.append(list(envoyes))
-            recents = recents[-max(1, int(r["moyenne_servo"])):]
-            sortie = [sum(p[i] for p in recents) / len(recents)
+            recents.append((t, list(envoyes)))
+            fenetre = r["lissage_ms"] / 1000.0
+            while len(recents) > 1 and t - recents[0][0] > fenetre:
+                recents.pop(0)
+            del recents[:-64]          # garde-fou si la cadence s'envole
+            sortie = [sum(p[1][i] for p in recents) / len(recents)
                       for i in range(len(envoyes))]
 
             if fil_vue is not None and t > prochaine_vue:
