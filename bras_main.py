@@ -28,6 +28,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 import time
 from typing import Optional, Sequence, Tuple
 
@@ -550,9 +551,65 @@ def _inclinaison(monde):
     return abs(float(n[2])) / nn if nn > 1e-9 else None
 
 
+class FilCapture(threading.Thread):
+    """Vide la file de tampons V4L2 et ne garde que la derniere image.
+
+    Un seul lecteur touche `cap` : tout le reste du programme passe par
+    `dernier()`. Sans cette regle, deux `read()` concurrents se disputent le
+    meme peripherique.
+
+    `cap.read()` libere le verrou global de Python pendant l'ioctl et la
+    decompression MJPEG, donc ce fil travaille reellement en parallele de
+    MediaPipe plutot que de lui voler du temps.
+    """
+
+    def __init__(self, cap):
+        super().__init__(daemon=True)
+        self.cap = cap
+        self.verrou = threading.Lock()
+        self.image = None
+        self.t_image = 0.0
+        self.n = 0
+        self.perdues = 0          # images jetees sans avoir ete regardees
+        self.vues = 0
+        self.arret = False
+
+    def run(self):
+        while not self.arret:
+            ok, img = self.cap.read()
+            if not ok or img is None:
+                time.sleep(0.005)
+                continue
+            with self.verrou:
+                if self.image is not None and self.n > self.vues:
+                    self.perdues += 1
+                self.image = img
+                self.t_image = time.time()
+                self.n += 1
+
+    def dernier(self, attendre=False):
+        """La derniere image arrivee. `attendre` en reclame une neuve."""
+        if attendre:
+            with self.verrou:
+                repere = self.n
+            fin = time.time() + 1.0
+            while time.time() < fin:
+                with self.verrou:
+                    if self.n > repere:
+                        break
+                time.sleep(0.002)
+        with self.verrou:
+            self.vues = self.n
+            return self.image, self.t_image
+
+    def fermer(self):
+        self.arret = True
+        self.join(timeout=1.0)
+
+
 class Main:
     def __init__(self, device=-1, largeur=640, hauteur=480,
-                 exposition=120, gain=28, flip=0):
+                 exposition=120, gain=28, flip=0, filee=True):
         import cv2
         import mediapipe as mp
         self.cv2, self.mp = cv2, mp
@@ -578,6 +635,16 @@ class Main:
             min_detection_confidence=0.5, min_tracking_confidence=0.3)
         # 0 = vertical, 1 = horizontal, -1 = 180 deg, None = aucun
         self.flip = flip
+        # chronometrage, pour savoir ou passent les millisecondes plutot que
+        # de l'estimer : age de l'image servie, puis chaque etape de `lire`
+        self.age_image = 0.0
+        self.ms_capture = 0.0
+        self.ms_detection = 0.0
+        self.fil = None
+        if filee:
+            self.fil = FilCapture(self.cap)
+            self.fil.start()
+            self.fil.dernier(attendre=True)      # on attend la premiere image
         self.image = None
         self.reperes = None
         # si un ajustement de pose echoue, on reutilise la derniere distance
@@ -630,25 +697,50 @@ class Main:
         """Luminosite moyenne de l'image, 0 a 255."""
         vals = []
         for _ in range(n):
-            ok, img = self.cap.read()
+            ok, img = self._brute(attendre=True)
             if ok and img is not None and img.size:
                 vals.append(float(img.mean()))
         return sum(vals) / len(vals) if vals else 0.0
 
     def vider(self, n=6):
         """Jette n images. V4L2 garde quatre tampons en file : sans ca, on
-        mesure la luminosite d'avant le changement de reglage."""
+        mesure la luminosite d'avant le changement de reglage. En capture
+        filee le fil ne garde que la derniere image, mais il faut quand meme
+        laisser passer les images d'avant le changement de reglage."""
         for _ in range(n):
-            self.cap.read()
+            self._brute(attendre=True)
+
+    def _brute(self, attendre=False):
+        """Une image, du fil de capture s'il tourne, sinon directement.
+
+        Le fil change tout pour la latence. La camera delivre 30 images par
+        seconde, MediaPipe en consomme sept : la file de tampons V4L2 reste
+        donc pleine en permanence et `cap.read()` rend systematiquement la
+        plus ancienne. On traitait une image perimee a chaque tour. Le fil
+        vide la file aussi vite qu'elle se remplit et ne conserve que la
+        derniere arrivee, si bien que la decompression MJPEG quitte au passage
+        le chemin critique - la latence baisse et la cadence monte.
+        """
+        if self.fil is None:
+            ok, img = self.cap.read()
+            self.age_image = 0.0
+            return ok, img
+        img, t_img = self.fil.dernier(attendre)
+        self.age_image = (time.time() - t_img) if img is not None else 0.0
+        return img is not None, img
 
     def lire(self) -> Optional[dict]:
-        ok, image = self.cap.read()
+        t_a = time.time()
+        ok, image = self._brute()
+        self.ms_capture = 1000.0 * (time.time() - t_a)
         if not ok:
             return None
         if self.flip is not None:
             image = self.cv2.flip(image, self.flip)
         self.image = image
+        t_b = time.time()
         res = self.hands.process(self.cv2.cvtColor(image, self.cv2.COLOR_BGR2RGB))
+        self.ms_detection = 1000.0 * (time.time() - t_b)
         if not res.multi_hand_landmarks:
             self.reperes = None
             return None
@@ -714,6 +806,8 @@ class Main:
         self.cv2.imwrite(chemin, img)
 
     def fermer(self):
+        if self.fil is not None:
+            self.fil.fermer()       # avant release : un seul lecteur de cap
         self.cap.release()
 
 
@@ -1306,7 +1400,8 @@ setInterval(t,200);t();
 def principal(args) -> int:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     r = dict(REGLAGES)
-    main = Main(device=args.device, flip=REGLAGES["flip"])
+    main = Main(device=args.device, flip=REGLAGES["flip"],
+                filee=not args.capture_directe)
 
     if args.mesure:
         return diagnostic(main, args.port)
@@ -1396,6 +1491,10 @@ def principal(args) -> int:
     dernier_controle = 0.0
     dernier_expo = 0.0
     n = n_main = n_ik = 0
+    # cumuls de chronometrage, remis a zero a chaque bilan
+    cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0,
+           "tour": 0.0}
+    t_tour = time.time()
     distances = []
     t0 = time.time()
     prochain_apercu = 0.0
@@ -1408,6 +1507,12 @@ def principal(args) -> int:
             n += 1
             m = main.lire()
             t = time.time()
+            cum["n"] += 1
+            cum["age"] += main.age_image
+            cum["cap"] += main.ms_capture
+            cum["det"] += main.ms_detection
+            cum["tour"] += t - t_tour
+            t_tour = t
 
             # avant le test de presence : on doit pouvoir regler meme la main
             # hors du cadre, sinon la molette ne repond plus des qu'on lache
@@ -1515,6 +1620,15 @@ def principal(args) -> int:
                       f"  cos {main.cos_t or 0:.2f}"
                       f"  expo {main.reglages_expo}"
                       )
+                k = max(cum["n"], 1)
+                tour = 1000.0 * cum["tour"] / k
+                cap, det = cum["cap"] / k, cum["det"] / k
+                perdues = main.fil.perdues if main.fil else 0
+                print(f"       tour {tour:5.1f} ms  =  capture {cap:4.1f}"
+                      f"  + detection {det:5.1f}  + reste {tour-cap-det:5.1f}"
+                      f"   |  age image {1000*cum['age']/k:4.0f} ms"
+                      f"   images jetees {perdues}")
+                cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0, "tour": 0.0}
     except KeyboardInterrupt:
         print("\narret")
     finally:
@@ -1543,6 +1657,9 @@ if __name__ == "__main__":
     p.add_argument("--deprojection", action="store_true",
                    help="demarrer avec la correction de perspective active "
                         "(reglable ensuite depuis la page)")
+    p.add_argument("--capture-directe", action="store_true",
+                   help="lire la camera dans la boucle, sans fil separe : "
+                        "le comportement d'avant, pour comparer")
     p.add_argument("--cartesien", action="store_true",
                    help="demarrer en pilotage cartesien plutot que polaire "
                         "(reglable ensuite depuis la page)")
