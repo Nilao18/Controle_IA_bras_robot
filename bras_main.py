@@ -97,7 +97,10 @@ REGLAGES = {
     # periode d'envoi de l'image camera au simulateur, en secondes. Encoder
     # un JPEG coute quelques millisecondes : a 7 images par seconde on ne peut
     # pas se le permettre a chaque image sans perdre de la cadence.
-    "periode_vue_s": 0.25,
+    # Retour camera : 10 images par seconde, et reduit a 400 px de large.
+    # L'encodage est hors de la boucle de pilotage depuis le fil de vue, et
+    # une image plus petite se decode d'autant plus vite cote navigateur.
+    "periode_vue_s": 0.10, "vue_largeur": 400,
     # L'exposition etait reglee une seule fois au demarrage, en manuel. Quand
     # la lumiere de la piece baisse - un debut de soiree suffit - l'image
     # s'assombrit, les reperes se degradent, et la profondeur part sans que
@@ -285,7 +288,7 @@ MOLETTES = ("deprojection", "cartesien",
             "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "ancre_lat_mm",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
-            "lissage_ms", "ancre_coupure",
+            "lissage_ms", "ancre_coupure", "periode_vue_s",
             "x_min", "x_max", "y_min", "y_max")
 
 
@@ -1427,7 +1430,17 @@ def _dessiner(main, img, reperes):
     """
     if img is None:
         return None, None
-    img = img.copy()
+    # Reduite avant d'etre dessinee et encodee. Le panneau fait 330 px de
+    # large : envoyer du 640x480 coute un encodage plus lourd ici, et surtout
+    # un decodage plus lourd dans le navigateur, qui se paie en image de rendu
+    # volee au bras - la saccade se voyait synchronisee avec le retour camera.
+    large = int(REGLAGES["vue_largeur"])
+    h0, w0 = img.shape[:2]
+    if large > 0 and w0 > large:
+        img = main.cv2.resize(img, (large, max(1, round(h0 * large / w0))),
+                              interpolation=main.cv2.INTER_AREA)
+    else:
+        img = img.copy()
     if reperes is not None:
         h, w = img.shape[:2]
         pts = [(int(p.x * w), int(p.y * h)) for p in reperes]

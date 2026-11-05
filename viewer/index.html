@@ -1027,14 +1027,23 @@ window.SIMU = {
     .then(function(e){
       if(!e || !e.mesures || !Object.keys(e.mesures).length) return;
       b.hidden = false;
-      im.src = "camera.jpg?" + Date.now();
+      // Decodage hors du fil principal. Affecter src directement fait
+      // decoder puis peindre pendant le rendu, ce qui coute une image du
+      // bras a chaque rafraichissement - la saccade se voyait alors
+      // synchronisee avec le retour camera. decode() rend la main une fois
+      // l'image prete, et l'affectation suivante ne fait plus que l'echanger.
+      var pre = new Image();
+      pre.src = "camera.jpg?" + Date.now();
+      (pre.decode ? pre.decode() : Promise.resolve())
+        .then(function(){ im.src = pre.src; })
+        .catch(function(){ im.src = pre.src; });
       tb.innerHTML = Object.entries(e.mesures).map(function(kv){
         return '<tr><td style="padding:1px 4px;color:#9fb0b6">' + kv[0] +
                '</td><td style="padding:1px 4px;text-align:right;color:#4fcfc6">' +
                kv[1] + '</td></tr>'; }).join("");
     }).catch(function(){});
   }
-  setInterval(tour, 250); tour();
+  setInterval(tour, 100); tour();
 
   // Molettes : on pose la valeur dans le programme qui tourne, sans le
   // relancer. Refaire la calibration a chaque essai rendait tout reglage
@@ -1048,6 +1057,7 @@ window.SIMU = {
     ["ancre_lat_mm",   "zone morte lat.",   0, 40, 1, "mm"],
     ["lissage_ms",     "lissage",           0,400,10, "ms"],
     ["ancre_coupure",  "passe-bas",         0,  3,.1, "Hz"],
+    ["periode_vue_s",  "retour cam",      .05,.5,.05, "s"],
     ["ancre_r_mm",     "zone morte rayon",  0, 40, 1, "mm"],
     ["ancre_z_mm",     "zone morte hauteur",0, 40, 1, "mm"],
     ["ancre_base_deg", "zone morte base",   0,  6, .1, "\u00b0"],
