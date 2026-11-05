@@ -111,7 +111,7 @@ REGLAGES = {
     # declenchait sur elle. Cinq rattrapages en une minute, chacun vidant les
     # tampons - c'etait la latence. On ne mesure donc que les images SANS
     # main, et jamais plus d'une fois par minute.
-    "expo_sans_main": True,
+    "expo_sans_main": True, "expo_en_route": 0.0,
     "expo_periode_mini_s": 60.0,
     # convertit la racine d'aire en metres : distance = cette constante / aire.
     # Valeur approchee, la calibration proche/loin absorbe l'echelle.
@@ -144,6 +144,9 @@ REGLAGES = {
     # seconde cela autorise 214 mm d'une image a l'autre, soit tous les gestes
     # jusqu'a 0,6 m/s sans un seul faux rejet, et aucune des aberrations
     # relevees. Apres 2 refus d'affilee on cede : la main a vraiment bouge.
+    # Plancher de bruit de la porte de vitesse, en mm. S'ajoute au terme de
+    # vitesse pour que le seuil ne se resserre pas quand la cadence monte.
+    "saut_bruit_mm": 40.0,
     "saut_v_max": 1.5,
     "saut_suite_max": 2,
 
@@ -548,8 +551,8 @@ class Porte:
     entre deux images, c'est une erreur de mesure, pas un geste.
     """
 
-    def __init__(self, v_max=1.5, suite_max=2):
-        self.v_max, self.suite_max = v_max, suite_max
+    def __init__(self, v_max=1.5, suite_max=2, bruit=0.040):
+        self.v_max, self.suite_max, self.bruit = v_max, suite_max, bruit
         self.reset()
 
     def reset(self):
@@ -561,7 +564,18 @@ class Porte:
     def __call__(self, d, t):
         if self.dernier is not None and self.t is not None:
             dt = max(1e-3, t - self.t)
-            if abs(d - self.dernier) > self.v_max * dt and self.suite < self.suite_max:
+            # Un terme de vitesse SEUL devient trop serre quand la cadence
+            # monte : l'erreur de mesure, elle, ne diminue pas avec
+            # l'intervalle. Une erreur de 10 cm vaut 0,9 m/s a 9 images par
+            # seconde et 1,7 a 17 - en doublant la cadence on a double la
+            # vitesse apparente du bruit, et la porte s'est mise a rejeter
+            # des mesures valables (0 rejet a 8,9 img/s, 180 a 16,9). Chaque
+            # rejet fige la profondeur une image, d'ou des arrets brefs en
+            # plein mouvement. Le plancher de bruit ne depend pas de la
+            # cadence et laisse la porte faire son vrai travail : ecarter les
+            # aberrations a 1757 mm.
+            seuil = self.v_max * dt + self.bruit
+            if abs(d - self.dernier) > seuil and self.suite < self.suite_max:
                 self.suite += 1
                 self.rejets += 1
                 return self.dernier
@@ -817,7 +831,8 @@ class Main:
         # valable plutot que de jeter l'image
         self.derniere_distance = None
         self.porte = Porte(v_max=REGLAGES["saut_v_max"],
-                           suite_max=REGLAGES["saut_suite_max"])
+                           suite_max=REGLAGES["saut_suite_max"],
+                           bruit=REGLAGES["saut_bruit_mm"] / 1000.0)
         self.recentes = []       # mediane glissante sur la distance
         self.hors_cadre = 0      # images ou la paume touchait le bord
         self.cos_t = None        # inclinaison de paume sur la derniere image
@@ -1755,6 +1770,13 @@ def principal(args) -> int:
     # cumuls de chronometrage, remis a zero a chaque bilan
     cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0, "tour": 0.0,
            "cmd": 0.0, "ik": 0.0, "out": 0.0, "nik": 0}
+    # Les trous : images consecutives sans commande, pendant lesquelles le
+    # bras reste fige. Le taux global ne suffit pas - des ratés isoles sont
+    # masques par le lissage, trois ou quatre d'affilee se voient. C'est la
+    # longueur des trous qui decide, pas leur nombre.
+    trou = 0
+    trous = {"n": 0, "cumul": 0, "max": 0, "longs": 0,
+             "sans_main": 0, "ik": 0}
     t_tour = t_commande = time.time()
     distances = []
     t0 = time.time()
@@ -1788,7 +1810,13 @@ def principal(args) -> int:
                         and t - dernier_controle > r["periode_luminosite_s"]):
                     dernier_controle = t
                     main.lum = float(main.image.mean())
-                    if (abs(main.lum - r["cible_luminosite"]) > r["derive_luminosite"]
+                    # Un recalage enchaine jusqu'a six essais a 0,25 s plus
+                    # dix images jetees : environ 3,5 secondes de bras fige.
+                    # Huit recalages ont ete releves sur une seule session.
+                    # Desactive par defaut : la camera est en manuel, le
+                    # reglage initial tient. --expo-en-route pour le remettre.
+                    if (r["expo_en_route"]
+                            and abs(main.lum - r["cible_luminosite"]) > r["derive_luminosite"]
                             and t - dernier_expo > r["expo_periode_mini_s"]):
                         dernier_expo = t
                         print("  luminosite %.0f sans main : on refait le reglage"
@@ -1797,6 +1825,8 @@ def principal(args) -> int:
                         main.reglages_expo += 1
                 if t - derniere_main > r["tolerance_perte_s"] and visu and envoyes:
                     visu.publier(envoyes, source="main perdue")
+                trou += 1
+                trous["sans_main"] += 1
                 continue
 
             n_main += 1
@@ -1836,8 +1866,17 @@ def principal(args) -> int:
             cum["ik"] += t_out - t_ik
             cum["nik"] += 1
             if sol is None:
+                trou += 1
+                trous["ik"] += 1
                 continue
             n_ik += 1
+            if trou:
+                trous["n"] += 1
+                trous["cumul"] += trou
+                trous["max"] = max(trous["max"], trou)
+                if trou >= 3:
+                    trous["longs"] += 1
+                trou = 0
             dt_cmd = _borne(t - t_commande, r["pas_mini_s"], r["pas_maxi_s"])
             t_commande = t
             envoyes = _limiter(sol.servos, envoyes,
@@ -1919,6 +1958,15 @@ def principal(args) -> int:
                       f"  + detection {det:5.1f}  + reste {tour-cap-det:5.1f}"
                       f"   |  age image {1000*cum['age']/k:4.0f} ms"
                       f"   images jetees {perdues}")
+                moy = trous["cumul"] / max(trous["n"], 1)
+                print(f"       trous {trous['n']:3d}  longueur moy {moy:3.1f}"
+                      f"  max {trous['max']:2d} img"
+                      f"  ({trous['max'] * tour:4.0f} ms de bras fige)"
+                      f"   |  sans main {trous['sans_main']:3d}"
+                      f"  IK {trous['ik']:3d}"
+                      f"   dont {trous['longs']:2d} de 3 img ou plus")
+                trous = {"n": 0, "cumul": 0, "max": 0, "longs": 0,
+                         "sans_main": 0, "ik": 0}
                 if fil_vue is not None:
                     print(f"       vue {fil_vue.ms:5.1f} ms hors boucle"
                           f"   vues abandonnees {fil_vue.abandons}")
@@ -1964,6 +2012,9 @@ if __name__ == "__main__":
     p.add_argument("--deprojection", action="store_true",
                    help="demarrer avec la correction de perspective active "
                         "(reglable ensuite depuis la page)")
+    p.add_argument("--expo-en-route", action="store_true",
+                   help="autoriser le recalage d'exposition pendant la "
+                        "session (fige le bras ~3,5 s a chaque fois)")
     p.add_argument("--defauts", action="store_true",
                    help="ignorer les reglages sauvegardes et repartir des "
                         "valeurs du code")
@@ -1985,6 +2036,8 @@ if __name__ == "__main__":
         REGLAGES["cartesien"] = 1.0
     if a.fils is not None:
         REGLAGES["fils_detection"] = a.fils
+    if a.expo_en_route:
+        REGLAGES["expo_en_route"] = 1.0
     if a.defauts:
         globals()["IGNORER_MOLETTES"] = True
     raise SystemExit(principal(a))
