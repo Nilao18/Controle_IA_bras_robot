@@ -992,11 +992,22 @@ function viserServos(vals, ouv){
     document.getElementById("ouvVal").textContent = OUV_CIBLE.toFixed(0) + " mm";
   }
 }
+// Livraison, et non sondage.
+//
+// A interroger toutes les 50 ms une carte qui publie toutes les 57, les deux
+// cadences battent l'une contre l'autre : la page apprenait l'existence
+// d'une pose tantot apres 50 ms, tantot apres 100, et le bras se figeait une
+// image avant de rattraper. On demande donc "la pose apres la numero N" ; le
+// serveur attend qu'elle existe, et on redemande aussitot la reponse recue.
+var NUMERO = -1;
 function sondeLive(){
-  fetch("etat", {cache:"no-store"}).then(function(r){
+  var url = NUMERO >= 0 ? ("etat?apres=" + NUMERO) : "etat";
+  fetch(url, {cache:"no-store"}).then(function(r){
     return r.ok ? r.json() : null;
   }).then(function(e){
-    if(!e || !e.servos) return;
+    if(!e || !e.servos){ setTimeout(sondeLive, 300); return; }
+    if(typeof e.numero === "number") NUMERO = e.numero;
+    setTimeout(sondeLive, 0);
     liveDernier = Date.now();
     diagPose(e.servos);
     viserServos(e.servos, e.ouverture);
@@ -1009,6 +1020,7 @@ function sondeLive(){
       document.getElementById("liveEtat").textContent = "signal perdu";
       document.getElementById("live").classList.add("perdu");
     }
+    setTimeout(sondeLive, 300);        // on ne martele pas une carte muette
   });
 }
 function demarrerLive(){
@@ -1016,9 +1028,8 @@ function demarrerLive(){
   spin = false; syncSpin();
   document.getElementById("live").hidden = false;
   document.getElementById("rail").classList.add("verrou");
-  // 50 ms : au-dessus de la cadence de pilotage (57 ms), donc chaque
-  // commande est vue. L'interpolation se charge du reste.
-  setInterval(sondeLive, 50);
+  // Plus d'intervalle : la boucle se relance elle-meme des qu'une pose
+  // arrive. Une seule requete est en vol a la fois.
   sondeLive();
 }
 

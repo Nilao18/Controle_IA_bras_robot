@@ -26,6 +26,7 @@ import socket
 import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 from typing import Optional, Sequence
 
 RACINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "viewer")
@@ -33,8 +34,23 @@ POSE_REPOS = [90.0, 0.0, 0.0, 0.0, 90.0]
 
 
 class _Etat:
+    """Pose courante, avec un numero d'ordre pour la livrer sans sondage.
+
+    La page interrogeait toutes les 50 ms une boucle qui publie toutes les
+    57 : les deux cadences battent l'une contre l'autre et la page apprenait
+    l'existence d'une pose tantot apres 50 ms, tantot apres 100. Mesure dans
+    le navigateur : 16,2 poses par seconde pour 29 ms de gigue sur un
+    intervalle moyen de 62 - le bras se figeait une image puis rattrapait.
+
+    Avec un numero d'ordre, la page demande "la pose apres la numero N" et le
+    serveur attend qu'elle existe avant de repondre. Chaque pose part donc a
+    l'instant ou elle est publiee, sans battement et sans attente inutile.
+    """
+
     def __init__(self):
         self.verrou = threading.Lock()
+        self.numero = 0
+        self.signal = threading.Condition(self.verrou)
         self.servos = list(POSE_REPOS)
         self.ouverture = 0.0
         self.source = "au repos"
@@ -48,6 +64,22 @@ class _Etat:
             return {"servos": list(self.servos), "ouverture": self.ouverture,
                     "source": self.source, "mesures": dict(self.mesures),
                     "reglages": dict(self.reglages),
+                    "numero": self.numero,
+                    "age": round(time.time() - self.horodatage, 2)}
+
+    def lire_apres(self, numero: int, attente: float = 1.0) -> dict:
+        """La pose suivante. Attend qu'elle existe, au plus `attente`."""
+        fin = time.time() + attente
+        with self.verrou:
+            while self.numero <= numero:
+                reste = fin - time.time()
+                if reste <= 0:
+                    break
+                self.signal.wait(reste)
+            return {"servos": list(self.servos), "ouverture": self.ouverture,
+                    "source": self.source, "mesures": dict(self.mesures),
+                    "reglages": dict(self.reglages),
+                    "numero": self.numero,
                     "age": round(time.time() - self.horodatage, 2)}
 
     def ecrire(self, servos: Sequence[float], ouverture: Optional[float],
@@ -59,6 +91,8 @@ class _Etat:
             if source is not None:
                 self.source = source
             self.horodatage = time.time()
+            self.numero += 1
+            self.signal.notify_all()
 
     def image(self, jpeg, mesures=None) -> None:
         """Publie l'image camera annotee et les grandeurs mesurees."""
@@ -101,7 +135,17 @@ class _Handler(SimpleHTTPRequestHandler):
             self.wfile.write(corps)
             return
         if self.path.split("?")[0].rstrip("/") == "/etat":
-            corps = json.dumps(_etat.lire()).encode("utf-8")
+            # ?apres=N : on attend qu'une pose plus recente existe, au lieu de
+            # rendre aussitot la pose courante. La page redemande alors sans
+            # delai, et chaque pose lui parvient a l'instant ou elle est
+            # publiee. Sans ce parametre, comportement d'avant.
+            requete = parse_qs(urlparse(self.path).query)
+            apres = requete.get("apres", [None])[0]
+            if apres is not None and apres.lstrip("-").isdigit():
+                etat = _etat.lire_apres(int(apres))
+            else:
+                etat = _etat.lire()
+            corps = json.dumps(etat).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(corps)))
