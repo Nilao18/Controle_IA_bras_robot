@@ -160,6 +160,11 @@ REGLAGES = {
     # reussite sur 42 essais) : un axe ne bouge que si sa consigne s'ecarte de
     # plus de 2 degres de sa position. C'est la derniere barriere, posee au
     # plus pres du servo, apres tous les autres filtrages.
+    # Part de l'ecart comblee a chaque image TANT QU'ON EST sous la zone
+    # morte. 0 = hysteresis franche, l'axe ne bouge pas du tout ; 1 = pas de
+    # zone morte du tout. Entre les deux, un geste lent passe sans a-coup
+    # pendant que le tremblement, de moyenne nulle, se compense.
+    "rattrapage": 0.15,
     "zone_morte_deg": 0.0,
     # moyenne glissante sur les angles envoyes, en images. Meme source : trois
     # images. Elle n'arrondit que les marches laissees par le seuil ci-dessus.
@@ -236,7 +241,7 @@ REGLAGES = {
     # derive lente DANS la zone morte. A zero, l'hysteresis est franche : sous
     # le seuil le bras ne bouge pas du tout, et aucune derive lente ne passe.
     # C'est au prix d'un decalage residuel qui peut atteindre le seuil.
-    "ancre_rattrapage": 0.0,
+    "ancre_rattrapage": 0.15,
     # passe-bas leger APRES l'ancre, juste pour arrondir ses marches
     # 0 = pas de passe-bas apres l'ancre. Voir Lisseur : a 0,6 Hz ce filtre
     # retardait de 265 ms main posee et de 35 ms main rapide, soit un rapport
@@ -289,6 +294,7 @@ MOLETTES = ("deprojection", "cartesien",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
             "lissage_ms", "ancre_coupure", "periode_vue_s",
+            "rattrapage", "ancre_rattrapage",
             "x_min", "x_max", "y_min", "y_max")
 
 
@@ -1511,7 +1517,7 @@ class FilVue(threading.Thread):
 
 
 def _limiter(cible: Sequence[float], courant: Optional[Sequence[float]],
-             vmax: float, zone_morte: float = 0.0):
+             vmax: float, zone_morte: float = 0.0, rattrapage: float = 0.0):
     """Limite la vitesse, et ignore les ecarts sous la zone morte.
 
     Sans zone morte, chaque axe corrige en permanence un dixieme de degre :
@@ -1539,7 +1545,15 @@ def _limiter(cible: Sequence[float], courant: Optional[Sequence[float]],
     for t, c in zip(cible, courant):
         d = t - c
         if abs(d) < zone_morte:
-            sortie.append(c)
+            # Rattrapage : on comble lentement l'ecart au lieu de ne rien
+            # faire. Sans lui, un geste lent fait moins que le seuil par
+            # image, l'axe reste donc fige jusqu'a ce que l'ecart l'atteigne,
+            # puis avance d'un bloc. Mesure dans le navigateur : 12 poses
+            # differentes par seconde pour 20,6 publiees, soit un tour sur
+            # deux fige - une saccade de 100 ms a vitesse lente. Le bruit de
+            # detection, lui, est de moyenne nulle : il se compense et ne
+            # produit pas de derive.
+            sortie.append(c + rattrapage * d)
         else:
             sortie.append(c + _borne(d - math.copysign(zone_morte, d),
                                      -vmax, vmax))
@@ -1776,6 +1790,9 @@ def principal(args) -> int:
             molettes[cle] = r[cle] = val
             if cle in seuils:
                 seuils[cle].ancre.seuil = val
+            if cle == "ancre_rattrapage":
+                for f in seuils.values():
+                    f.ancre.rattrapage = val
             if cle == "ancre_coupure":
                 for f in seuils.values():
                     f.filtre = UnEuro(val, r["ancre_beta"]) if val > 0 else None
@@ -1913,7 +1930,7 @@ def principal(args) -> int:
             t_commande = t
             envoyes = _limiter(sol.servos, envoyes,
                                r["vitesse_max_deg_s"] * dt_cmd,
-                               r["zone_morte_deg"])
+                               r["zone_morte_deg"], r["rattrapage"])
             # Moyenne glissante sur un NOMBRE d'images, ce nombre etant
             # deduit de la cadence pour que le retard reste le meme quand
             # elle change.
