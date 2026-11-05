@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import json
 import math
 import os
 import subprocess
@@ -164,9 +165,10 @@ REGLAGES = {
     # que soit la cadence - c'est donc en temps qu'il faut l'exprimer pour
     # qu'il garde le meme sens.
     #
-    # 120 ms reproduisent le reglage trouve a la main : 3 images a 17 img/s
-    # s'etalent sur 118 ms, soit 59 ms de retard.
-    "lissage_ms": 120.0,
+    # Constante de temps d'un filtre du premier ordre : le retard introduit
+    # vaut a peu pres tau. 60 ms reproduisent le reglage trouve a la main,
+    # qui donnait 59 ms de retard a 17 images par seconde.
+    "lissage_ms": 60.0,
 
     "x_min": 0.20, "x_max": 0.80,
     # pleine hauteur d'image : toute la course verticale du bras tient entre
@@ -199,7 +201,7 @@ REGLAGES = {
     "av_min": 60.0, "av_max": 320.0,    # avance devant l'axe de base, en mm
     "lat_amplitude": 280.0,             # deport lateral, +/- mm
     "lat_sens": -1,                     # meme convention que base_sens
-    "ancre_lat_mm": 0.0,                # zone morte laterale, en mm
+    "ancre_lat_mm": 10.0,               # zone morte laterale, en mm
 
     # ouverture de pince, rapport ecart(pouce,index) / taille de main
     "pince_fermee": 0.30,
@@ -264,6 +266,12 @@ NOMS = ("base", "epaule", "coude", "inclinaison", "rotation")
 # Reglages modifiables depuis la page du simulateur, sans relancer le
 # programme. Refaire la calibration a chaque essai rendait tout reglage fin
 # impraticable : une valeur se juge sur dix prises de jeton, pas sur une.
+# Reglages des molettes, conserves d'un lancement a l'autre. Sans fichier,
+# chaque redemarrage effacait silencieusement ce qui venait d'etre trouve au
+# curseur - et on attribuait la regression au dernier correctif.
+FICHIER_MOLETTES = "~/bras_molettes.json"
+IGNORER_MOLETTES = False   # --defauts : ne pas relire, mais continuer a ecrire
+
 MOLETTES = ("deprojection", "cartesien",
             "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "ancre_lat_mm",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
@@ -585,6 +593,36 @@ def _inclinaison(monde):
     n = np.cross(p[5] - p[0], p[17] - p[0])
     nn = float(np.linalg.norm(n))
     return abs(float(n[2])) / nn if nn > 1e-9 else None
+
+
+def charger_molettes(r: dict) -> str:
+    """Reprend les reglages du dernier lancement. Jamais bloquant."""
+    if IGNORER_MOLETTES:
+        return "molettes : valeurs du code (--defauts)"
+    chemin = os.path.expanduser(FICHIER_MOLETTES)
+    if not os.path.exists(chemin):
+        return "molettes : valeurs du code (aucun %s)" % FICHIER_MOLETTES
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            d = json.load(f)
+    except Exception as e:
+        return "molettes : %s illisible (%s), valeurs du code" % (chemin, e)
+    repris = [k for k in MOLETTES if k in d]
+    for k in repris:
+        r[k] = float(d[k])
+    return "molettes : %d reglages repris de %s" % (len(repris), FICHIER_MOLETTES)
+
+
+def garder_molettes(valeurs: dict) -> None:
+    """Ecrit les reglages courants. Une ecriture ratee ne doit rien casser."""
+    chemin = os.path.expanduser(FICHIER_MOLETTES)
+    try:
+        with open(chemin + ".tmp", "w", encoding="utf-8") as f:
+            json.dump({k: valeurs[k] for k in MOLETTES if k in valeurs},
+                      f, indent=1, sort_keys=True)
+        os.replace(chemin + ".tmp", chemin)
+    except Exception as e:
+        print("  molettes non sauvegardees : %s" % e)
 
 
 def forcer_fils_mediapipe(n: int) -> str:
@@ -1630,6 +1668,8 @@ def principal(args) -> int:
         return Lisseur(seuil, r["ancre_rattrapage"],
                        r["ancre_coupure"], r["ancre_beta"])
 
+    print(charger_molettes(r))
+
     f_base = lisseur(r["ancre_base_deg"])
     f_r = lisseur(r["ancre_r_mm"])
     f_z = lisseur(r["ancre_z_mm"])
@@ -1671,11 +1711,13 @@ def principal(args) -> int:
                 for f in (f_base, f_r, f_av, f_lat):
                     f.ancre.y = None
                 print("  mode : %s" % ("cartesien" if val else "polaire"))
+                garder_molettes(molettes)
                 continue
             print("  molette : %s = %g" % (cle, val))
+            garder_molettes(molettes)
 
     envoyes = None
-    recents = []            # (instant, pose) sur la fenetre de lissage
+    sortie = None           # etat du lissage, conserve entre les images
     derniere_main = 0.0
     dernier_controle = 0.0
     dernier_expo = 0.0
@@ -1771,13 +1813,22 @@ def principal(args) -> int:
             envoyes = _limiter(sol.servos, envoyes,
                                r["vitesse_max_deg_s"] * dt_cmd,
                                r["zone_morte_deg"])
-            recents.append((t, list(envoyes)))
-            fenetre = r["lissage_ms"] / 1000.0
-            while len(recents) > 1 and t - recents[0][0] > fenetre:
-                recents.pop(0)
-            del recents[:-64]          # garde-fou si la cadence s'envole
-            sortie = [sum(p[1][i] for p in recents) / len(recents)
-                      for i in range(len(envoyes))]
+            # Lissage a constante de temps plutot que moyenne sur une fenetre
+            # de duree fixe. La fenetre gardait "les images des N dernieres
+            # millisecondes", donc 2 ou 3 images selon la gigue de cadence :
+            # a 17 img/s, trois images s'etalent sur 114 ms et quatre sur 171,
+            # on tombait pile sur la frontiere. La moyenne de 2 echantillons
+            # bruites n'etant pas celle de 3, la bascule faisait sauter la
+            # sortie a main immobile - le lissage devenait lui-meme une source
+            # de tremblement. Un filtre du premier ordre n'a pas de notion de
+            # nombre d'echantillons, donc pas de marche a franchir, et reste
+            # independant de la cadence par construction.
+            tau = r["lissage_ms"] / 1000.0
+            if sortie is None or tau <= 0.0:
+                sortie = list(envoyes)
+            else:
+                k = dt_cmd / (tau + dt_cmd)
+                sortie = [s + k * (e - s) for s, e in zip(sortie, envoyes)]
 
             if fil_vue is not None and t > prochaine_vue:
                 prochaine_vue = t + r["periode_vue_s"]
@@ -1874,6 +1925,9 @@ if __name__ == "__main__":
     p.add_argument("--deprojection", action="store_true",
                    help="demarrer avec la correction de perspective active "
                         "(reglable ensuite depuis la page)")
+    p.add_argument("--defauts", action="store_true",
+                   help="ignorer les reglages sauvegardes et repartir des "
+                        "valeurs du code")
     p.add_argument("--fils", type=int, default=None,
                    help="fils de calcul laisses a MediaPipe (0 = defaut)")
     p.add_argument("--capture-directe", action="store_true",
@@ -1892,4 +1946,6 @@ if __name__ == "__main__":
         REGLAGES["cartesien"] = 1.0
     if a.fils is not None:
         REGLAGES["fils_detection"] = a.fils
+    if a.defauts:
+        globals()["IGNORER_MOLETTES"] = True
     raise SystemExit(principal(a))
