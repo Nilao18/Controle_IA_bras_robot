@@ -7,6 +7,7 @@
 !bras_collision.json
 !orientation.py
 !analyse.py
+!fils_detection.py
 !mesure_profondeur.py
 !viewer/
 !sketch/
