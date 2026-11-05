@@ -874,6 +874,45 @@ var last = 0;
 // calcule sur l'intervalle reel, donc independant de la cadence d'affichage.
 var CIBLE = null, OUV_CIBLE = null, TAU_VUE = 0.055;
 
+// Mesure de l'affichage, pour trancher entre deux causes de saccade sans
+// avoir besoin d'un second appareil : si le rendu tient 55 a 60 images par
+// seconde et que les poses arrivent regulierement a la cadence de la carte,
+// alors les donnees et l'affichage sont sains et il faut chercher ailleurs.
+// Si le rendu s'effondre, c'est la machine qui affiche. Si les poses
+// arrivent par a-coups, c'est la carte ou le reseau.
+var DIAG = {aff: 0, t0: 0, fps: 0, dernPose: 0, inter: [], posesS: 0,
+            gigue: 0, prec: null, texte: ""};
+
+function diagImage(t){
+  DIAG.aff++;
+  if(!DIAG.t0){ DIAG.t0 = t; return; }
+  if(t - DIAG.t0 >= 1000){
+    DIAG.fps = DIAG.aff * 1000 / (t - DIAG.t0);
+    DIAG.aff = 0; DIAG.t0 = t;
+    var v = DIAG.inter;
+    if(v.length > 1){
+      var m = v.reduce(function(a,b){return a+b;},0)/v.length;
+      var s2 = v.reduce(function(a,b){return a+(b-m)*(b-m);},0)/v.length;
+      DIAG.posesS = 1000/m; DIAG.gigue = Math.sqrt(s2);
+    }
+    DIAG.inter = [];
+    DIAG.texte = DIAG.fps.toFixed(0) + " img/s \u00b7 poses " +
+                 DIAG.posesS.toFixed(1) + "/s \u00b7 gigue " +
+                 DIAG.gigue.toFixed(0) + " ms";
+  }
+}
+
+function diagPose(vals){
+  var neuve = !DIAG.prec, i;
+  if(!neuve) for(i = 0; i < vals.length; i++)
+    if(vals[i] !== DIAG.prec[i]){ neuve = true; break; }
+  DIAG.prec = vals.slice();
+  if(!neuve) return;                       // meme pose : le sondage a double
+  var t = performance.now();
+  if(DIAG.dernPose) DIAG.inter.push(t - DIAG.dernPose);
+  DIAG.dernPose = t;
+}
+
 function interpoler(dt){
   if(CIBLE === null) return false;
   var k = dt / (TAU_VUE + dt), bouge = false, i, J;
@@ -893,6 +932,7 @@ function interpoler(dt){
 
 function loop(t){
   if(spin && last){ cam.th += (t-last)*0.00022; place(); }
+  diagImage(t);
   var dt = last ? Math.min(0.1, (t - last) / 1000) : 0;
   last = t;
   if(LIVE && dt > 0 && interpoler(dt)) poserGeometrie();
@@ -958,9 +998,11 @@ function sondeLive(){
   }).then(function(e){
     if(!e || !e.servos) return;
     liveDernier = Date.now();
+    diagPose(e.servos);
     viserServos(e.servos, e.ouverture);
     var el = document.getElementById("liveEtat");
-    el.textContent = e.source ? e.source : "bras connecté";
+    el.textContent = (e.source ? e.source : "bras connecté") +
+                     (DIAG.texte ? "  \u2502  " + DIAG.texte : "");
     document.getElementById("live").classList.remove("perdu");
   }).catch(function(){
     if(LIVE && Date.now() - liveDernier > 2500){
