@@ -233,6 +233,7 @@ MOLETTES = ("deprojection", "cartesien",
             "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "ancre_lat_mm",
             "zone_morte_deg", "vitesse_max_deg", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
+            "moyenne_servo",
             "x_min", "x_max", "y_min", "y_max")
 
 
@@ -1215,23 +1216,85 @@ class Resolveur:
         return None, 0.0
 
 
-def _vue_annotee(main):
-    """Image camera avec le squelette, encodee en JPEG."""
-    img = main.image
+def _dessiner(main, img, reperes):
+    """Squelette sur une copie de l'image, puis encodage JPEG.
+
+    Rend (jpeg, image dessinee). L'image et les reperes sont passes en
+    argument plutot que lus sur `main` : le fil de vue travaille sur ceux
+    d'une image donnee pendant que la boucle avance sur la suivante, et
+    `lire` remplace ces objets au lieu de les modifier sur place, donc en
+    tenir une reference suffit.
+    """
     if img is None:
-        return None
+        return None, None
     img = img.copy()
-    if main.reperes is not None:
+    if reperes is not None:
         h, w = img.shape[:2]
-        pts = [(int(p.x * w), int(p.y * h)) for p in main.reperes]
+        pts = [(int(p.x * w), int(p.y * h)) for p in reperes]
         for a, b in main.mp.solutions.hands.HAND_CONNECTIONS:
             main.cv2.line(img, pts[a], pts[b], (0, 220, 0), 2)
-        for i, p in enumerate(pts):
+        for p in pts:
             main.cv2.circle(img, p, 3, (0, 0, 230), -1)
         main.cv2.circle(img, pts[9], 7, (255, 255, 255), 2)   # le point pilote
     ok, buf = main.cv2.imencode(".jpg", img,
                                 [main.cv2.IMWRITE_JPEG_QUALITY, 65])
-    return buf.tobytes() if ok else None
+    return (buf.tobytes() if ok else None), img
+
+
+def _vue_annotee(main):
+    """Image camera annotee, encodee en JPEG. Chemin non critique."""
+    return _dessiner(main, main.image, main.reperes)[0]
+
+
+class FilVue(threading.Thread):
+    """Annote, encode et publie l'image hors du chemin critique.
+
+    Copier une image 640x480 puis l'encoder en JPEG coute une trentaine de
+    millisecondes sur ce processeur, et c'etait paye une image sur deux en
+    pleine boucle de pilotage - 38 ms de "reste" mesures sur 130 ms de tour.
+
+    Un seul travail est garde en attente : si la boucle en propose un
+    nouveau avant la fin du precedent, l'ancien est abandonne. Mieux vaut un
+    retour camera qui saute une image qu'une commande de bras qui retarde.
+    """
+
+    def __init__(self, visu, main):
+        super().__init__(daemon=True)
+        self.visu, self.main = visu, main
+        self.verrou = threading.Lock()
+        self.travail = None
+        self.arret = False
+        self.abandons = 0
+        self.ms = 0.0
+
+    def poser(self, image, reperes, mesures, fichier=None):
+        with self.verrou:
+            if self.travail is not None:
+                self.abandons += 1
+            self.travail = (image, reperes, mesures, fichier)
+
+    def run(self):
+        while not self.arret:
+            with self.verrou:
+                travail, self.travail = self.travail, None
+            if travail is None:
+                time.sleep(0.004)
+                continue
+            t0 = time.time()
+            img, reperes, mesures, fichier = travail
+            try:
+                jpeg, dessin = _dessiner(self.main, img, reperes)
+                if jpeg is not None:
+                    self.visu.publier_image(jpeg, mesures)
+                if fichier and dessin is not None:
+                    self.main.cv2.imwrite(fichier, dessin)
+            except Exception as e:                 # la vue ne doit rien casser
+                print("  fil de vue : %s" % e)
+            self.ms = 1000.0 * (time.time() - t0)
+
+    def fermer(self):
+        self.arret = True
+        self.join(timeout=1.0)
 
 
 def _limiter(cible: Sequence[float], courant: Optional[Sequence[float]],
@@ -1459,6 +1522,10 @@ def principal(args) -> int:
     # Les molettes de la page ne s'affichaient pas : elle les construit a
     # partir des valeurs publiees par /etat, et personne ne les publiait. On
     # les pose donc au demarrage, puis on relit ce que la page a deplace.
+    fil_vue = FilVue(visu, main) if visu else None
+    if fil_vue is not None:
+        fil_vue.start()
+
     molettes = {k: float(r[k]) for k in MOLETTES}
     seuils = {"ancre_base_deg": f_base, "ancre_r_mm": f_r, "ancre_z_mm": f_z,
               "ancre_lat_mm": f_lat}
@@ -1579,9 +1646,13 @@ def principal(args) -> int:
             sortie = [sum(p[i] for p in recents) / len(recents)
                       for i in range(len(envoyes))]
 
-            if visu and t > prochaine_vue:
+            if fil_vue is not None and t > prochaine_vue:
                 prochaine_vue = t + r["periode_vue_s"]
-                visu.publier_image(_vue_annotee(main),
+                fichier = None
+                if args.apercu and t > prochain_apercu:
+                    prochain_apercu = t + 1.0
+                    fichier = os.path.expanduser("~/bras_main.jpg")
+                fil_vue.poser(main.image, main.reperes,
                                    {"x": round(m["x"], 3), "y": round(m["y"], 3),
                                     "x corrige": round(m.get("x_corr", m["x"]), 3),
                                     "y corrige": round(m.get("y_corr", m["y"]), 3),
@@ -1591,7 +1662,8 @@ def principal(args) -> int:
                                     "pince_mm": round(co),
                                     "cos": round(main.cos_t or 0, 2),
                                     "images_s": round(n / max(t - t0, 1e-3), 1),
-                                    "main_pct": round(100 * n_main / max(n, 1))})
+                                    "main_pct": round(100 * n_main / max(n, 1))},
+                              fichier)
             if visu:
                 visu.publier(sortie, ouverture=co,
                              source=(f"main  R {cr:.0f}  Z {cz:.0f}  "
@@ -1600,10 +1672,6 @@ def principal(args) -> int:
             if moteurs:
                 moteurs.envoyer(sortie)
                 moteurs.pince_mm(co)
-
-            if args.apercu and t > prochain_apercu:
-                main.annoter(os.path.expanduser("~/bras_main.jpg"))
-                prochain_apercu = t + 1.0
 
             if n % 30 == 0:
                 dt = t - t0
@@ -1628,10 +1696,15 @@ def principal(args) -> int:
                       f"  + detection {det:5.1f}  + reste {tour-cap-det:5.1f}"
                       f"   |  age image {1000*cum['age']/k:4.0f} ms"
                       f"   images jetees {perdues}")
+                if fil_vue is not None:
+                    print(f"       vue {fil_vue.ms:5.1f} ms hors boucle"
+                          f"   vues abandonnees {fil_vue.abandons}")
                 cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0, "tour": 0.0}
     except KeyboardInterrupt:
         print("\narret")
     finally:
+        if fil_vue is not None:
+            fil_vue.fermer()
         main.fermer()
         if moteurs:
             moteurs.fermer()
