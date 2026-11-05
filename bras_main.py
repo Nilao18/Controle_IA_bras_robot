@@ -1188,6 +1188,11 @@ class Resolveur:
         self.pas = pas
         self.precedent: Optional[Sequence[float]] = None
         self.ecart_precedent = 0.0
+        # combien d'orientations de pince il faut essayer, et combien de
+        # branches la cinematique rend : si c'est la que passe le temps,
+        # autant le savoir avant d'optimiser au hasard
+        self.essais = 0
+        self.branches = 0
 
     def _offsets(self):
         o = [0.0]
@@ -1203,8 +1208,10 @@ class Resolveur:
     def __call__(self, x, y, z):
         from bras_ik import PINCE_BAS
         for d in self._offsets():
+            self.essais += 1
             sols = self.b.ik_toutes(x, y, z, orientation=PINCE_BAS + d,
                                     filtre=self.filtre)
+            self.branches += len(sols)
             if not sols:
                 continue
             if self.precedent is not None:
@@ -1559,8 +1566,8 @@ def principal(args) -> int:
     dernier_expo = 0.0
     n = n_main = n_ik = 0
     # cumuls de chronometrage, remis a zero a chaque bilan
-    cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0,
-           "tour": 0.0}
+    cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0, "tour": 0.0,
+           "cmd": 0.0, "ik": 0.0, "out": 0.0, "nik": 0}
     t_tour = time.time()
     distances = []
     t0 = time.time()
@@ -1607,7 +1614,7 @@ def principal(args) -> int:
 
             n_main += 1
             derniere_main = t
-
+            t_cmd = time.time()
 
             if r["cartesien"]:
                 av, lat, co, dmm = commandes_cartesien(m, cal, r)
@@ -1635,7 +1642,12 @@ def principal(args) -> int:
             x = b.base[0] - av
             y = b.base[1] - lat
 
+            t_ik = time.time()
             sol, ecart = resoudre(x, y, cz)
+            t_out = time.time()
+            cum["cmd"] += t_ik - t_cmd
+            cum["ik"] += t_out - t_ik
+            cum["nik"] += 1
             if sol is None:
                 continue
             n_ik += 1
@@ -1672,6 +1684,7 @@ def principal(args) -> int:
             if moteurs:
                 moteurs.envoyer(sortie)
                 moteurs.pince_mm(co)
+            cum["out"] += time.time() - t_out
 
             if n % 30 == 0:
                 dt = t - t0
@@ -1699,7 +1712,16 @@ def principal(args) -> int:
                 if fil_vue is not None:
                     print(f"       vue {fil_vue.ms:5.1f} ms hors boucle"
                           f"   vues abandonnees {fil_vue.abandons}")
-                cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0, "tour": 0.0}
+                ki = max(cum["nik"], 1)
+                print(f"       dont  commandes {1000*cum['cmd']/ki:5.1f}"
+                      f"  + cinematique {1000*cum['ik']/ki:5.1f}"
+                      f"  + sortie {1000*cum['out']/ki:5.1f} ms"
+                      f"   |  orientations essayees {resoudre.essais/ki:.1f}"
+                      f"   branches {resoudre.branches/ki:.1f}")
+                resoudre.essais = resoudre.branches = 0
+                cum = {"n": 0, "age": 0.0, "cap": 0.0,
+                       "det": 0.0, "tour": 0.0, "cmd": 0.0,
+                       "ik": 0.0, "out": 0.0, "nik": 0}
     except KeyboardInterrupt:
         print("\narret")
     finally:
