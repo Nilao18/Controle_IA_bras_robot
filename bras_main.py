@@ -263,11 +263,22 @@ REGLAGES = {
     # rapide que la realite. Multiplie par l'intervalle reel entre deux
     # commandes, le chiffre garde le meme sens quelle que soit la cadence.
     #
-    # 75 deg/s est la rampe appliquee par le STM32. C'est le seul chiffre
-    # reel : la vitesse propre des servos n'est pas documentee ici, et
-    # l'inertie du bras ne se devine pas. A revoir bras cable, en regardant
-    # le depassement et le courant.
-    "vitesse_max_deg_s": 75.0,
+    # Plafond GLOBAL, applique en plus des limites par axe ci-dessous. Sert
+    # a brider l'ensemble d'un coup de curseur sans toucher aux valeurs
+    # materielles.
+    "vitesse_max_deg_s": 300.0,
+
+    # Vitesses et accelerations par axe, identiques a celles du sketch du
+    # STM32 : base, epaule, coude, inclinaison, rotation. Les servos donnent
+    # a vide, a 6 V, 417 deg/s (MS62), 286 (XD065) et 600 (MG90S) ; on en
+    # retient 40 a 45 %, la charge prendra le reste. A verifier bras cable.
+    "vitesses_max_deg_s": (180.0, 120.0, 180.0, 250.0, 250.0),
+    "accelerations_deg_s2": (1200.0, 800.0, 1200.0, 1700.0, 1700.0),
+
+    # 1 = le simulateur applique la rampe d'acceleration du firmware, donc il
+    # montre ce que le bras fera. 0 = pas de limite d'acceleration, plus
+    # agreable a piloter mais mensonger.
+    "acceleration": 1.0,
 
     # bornes sur l'intervalle servant a cette limite. Apres une perte de main
     # de trois secondes, l'intervalle brut autoriserait un saut de 225 degres,
@@ -294,7 +305,7 @@ MOLETTES = ("deprojection", "cartesien",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
             "lissage_ms", "ancre_coupure", "periode_vue_s",
-            "rattrapage", "ancre_rattrapage",
+            "rattrapage", "ancre_rattrapage", "acceleration",
             "x_min", "x_max", "y_min", "y_max")
 
 
@@ -1516,6 +1527,37 @@ class FilVue(threading.Thread):
         self.join(timeout=1.0)
 
 
+def _rampe(cible, courant, vitesse, dt, vmax, amax):
+    """Rampe trapezoidale, la meme que celle du STM32.
+
+    Copie de la loi du sketch (bridgetest/sketch/sketch.ino), pour que le
+    simulateur montre ce que le bras fera et non ce qu'il ferait sans
+    inertie. Sans elle, le simulateur affichait un bras passant de l'arret a
+    sa vitesse de pointe en une image.
+
+    La vitesse est bornee deux fois : par le plafond de l'axe, et par ce qui
+    permet encore de s'arreter sur la cible. La forme continue sqrt(2.a.d)
+    depasse en pas discret - 1,2 degre sur un mouvement d'epaule de 90 - d'ou
+    les termes en a/2, qui corrigent le demi-pas parcouru pendant la periode.
+    """
+    sortie, v_sortie = [], []
+    for c, x, v, vm, am in zip(cible, courant, vitesse, vmax, amax):
+        vm, am = vm * dt, am * dt * dt
+        e = c - x
+        vise = _borne(e, -vm, vm)
+        if am > 0.0:
+            frein = math.sqrt(2.0 * am * abs(e) + 0.25 * am * am) - 0.5 * am
+            vise = _borne(vise, -frein, frein)
+            v = v + _borne(vise - v, -am, am)
+            if v * e > 0.0 and abs(v) > abs(e):
+                v = e
+        else:
+            v = vise
+        sortie.append(x + v)
+        v_sortie.append(v)
+    return sortie, v_sortie
+
+
 def _limiter(cible: Sequence[float], courant: Optional[Sequence[float]],
              vmax: float, zone_morte: float = 0.0, rattrapage: float = 0.0):
     """Limite la vitesse, et ignore les ecarts sous la zone morte.
@@ -1809,6 +1851,7 @@ def principal(args) -> int:
             garder_molettes(molettes)
 
     envoyes = None
+    vitesses = [0.0] * 5    # etat de la rampe, en degres par seconde
     sortie = None           # derniere pose publiee
     recents = []            # images moyennees par le lissage
     dt_lisse = 0.10         # intervalle entre images, lisse
@@ -1928,9 +1971,19 @@ def principal(args) -> int:
                 trou = 0
             dt_cmd = _borne(t - t_commande, r["pas_mini_s"], r["pas_maxi_s"])
             t_commande = t
-            envoyes = _limiter(sol.servos, envoyes,
-                               r["vitesse_max_deg_s"] * dt_cmd,
-                               r["zone_morte_deg"], r["rattrapage"])
+            # zone morte et rattrapage d'abord, sur une vitesse volontairement
+            # large : c'est la rampe qui limite ensuite, par axe
+            vise = _limiter(sol.servos, envoyes, 1e6,
+                            r["zone_morte_deg"], r["rattrapage"])
+            if envoyes is None:
+                envoyes, vitesses = list(vise), [0.0] * len(vise)
+            else:
+                g = r["vitesse_max_deg_s"]
+                vmax = [min(g, v) for v in r["vitesses_max_deg_s"]]
+                amax = (list(r["accelerations_deg_s2"]) if r["acceleration"]
+                        else [0.0] * len(vmax))
+                envoyes, vitesses = _rampe(vise, envoyes, vitesses, dt_cmd,
+                                           vmax, amax)
             # Moyenne glissante sur un NOMBRE d'images, ce nombre etant
             # deduit de la cadence pour que le retard reste le meme quand
             # elle change.
