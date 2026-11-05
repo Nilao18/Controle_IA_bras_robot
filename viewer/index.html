@@ -880,8 +880,15 @@ var CIBLE = null, OUV_CIBLE = null, TAU_VUE = 0.055;
 // alors les donnees et l'affichage sont sains et il faut chercher ailleurs.
 // Si le rendu s'effondre, c'est la machine qui affiche. Si les poses
 // arrivent par a-coups, c'est la carte ou le reseau.
-var DIAG = {aff: 0, t0: 0, fps: 0, dernPose: 0, inter: [], posesS: 0,
-            gigue: 0, prec: null, texte: ""};
+// Deux choses a ne pas confondre, et le premier jet les melangeait :
+//   recues  = reponses portant un numero neuf. C'est le TRANSPORT.
+//   bougent = reponses dont les angles different vraiment. C'est le
+//             MOUVEMENT ; une pose peut arriver a l'heure et etre identique
+//             a la precedente parce que les zones mortes ont gele la sortie.
+// La gigue porte sur le transport. Si elle est faible et que "bougent" est
+// loin de "recues", le reseau est sain et c'est la commande qui se fige.
+var DIAG = {aff: 0, t0: 0, fps: 0, dernRecue: 0, inter: [], recuesS: 0,
+            bouge: 0, bougeS: 0, gigue: 0, prec: null, texte: ""};
 
 function diagImage(t){
   DIAG.aff++;
@@ -893,24 +900,25 @@ function diagImage(t){
     if(v.length > 1){
       var m = v.reduce(function(a,b){return a+b;},0)/v.length;
       var s2 = v.reduce(function(a,b){return a+(b-m)*(b-m);},0)/v.length;
-      DIAG.posesS = 1000/m; DIAG.gigue = Math.sqrt(s2);
+      DIAG.recuesS = 1000/m; DIAG.gigue = Math.sqrt(s2);
     }
     DIAG.inter = [];
-    DIAG.texte = DIAG.fps.toFixed(0) + " img/s \u00b7 poses " +
-                 DIAG.posesS.toFixed(1) + "/s \u00b7 gigue " +
+    DIAG.bougeS = DIAG.bouge; DIAG.bouge = 0;
+    DIAG.texte = DIAG.fps.toFixed(0) + " img/s \u00b7 re\u00e7ues " +
+                 DIAG.recuesS.toFixed(1) + "/s \u00b7 bougent " +
+                 DIAG.bougeS.toFixed(0) + "/s \u00b7 gigue " +
                  DIAG.gigue.toFixed(0) + " ms";
   }
 }
 
 function diagPose(vals){
-  var neuve = !DIAG.prec, i;
-  if(!neuve) for(i = 0; i < vals.length; i++)
-    if(vals[i] !== DIAG.prec[i]){ neuve = true; break; }
+  var t = performance.now(), i, bouge = !DIAG.prec;
+  if(!bouge) for(i = 0; i < vals.length; i++)
+    if(vals[i] !== DIAG.prec[i]){ bouge = true; break; }
   DIAG.prec = vals.slice();
-  if(!neuve) return;                       // meme pose : le sondage a double
-  var t = performance.now();
-  if(DIAG.dernPose) DIAG.inter.push(t - DIAG.dernPose);
-  DIAG.dernPose = t;
+  if(bouge) DIAG.bouge++;
+  if(DIAG.dernRecue) DIAG.inter.push(t - DIAG.dernRecue);
+  DIAG.dernRecue = t;
 }
 
 function interpoler(dt){
@@ -1007,7 +1015,12 @@ function sondeLive(){
   }).then(function(e){
     if(!e || !e.servos){ setTimeout(sondeLive, 300); return; }
     if(typeof e.numero === "number") NUMERO = e.numero;
-    setTimeout(sondeLive, 0);
+    // La requete suivante part MAINTENANT, avant le travail d'affichage.
+    // Avec setTimeout(..., 0) elle attendait la fin de la tache courante et
+    // un tour de minuterie : la prochaine pose etait donc reclamee apres
+    // l'interpolation, le dessin et la mise a jour des textes, et ce retard
+    // variait avec la charge du navigateur - une gigue ajoutee pour rien.
+    sondeLive();
     liveDernier = Date.now();
     diagPose(e.servos);
     viserServos(e.servos, e.ouverture);

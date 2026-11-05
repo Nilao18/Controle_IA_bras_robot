@@ -121,6 +121,22 @@ _etat = _Etat()
 class _Handler(SimpleHTTPRequestHandler):
     racine = RACINE
 
+    # HTTP/1.1, donc connexions persistantes. En HTTP/1.0 - le defaut de
+    # SimpleHTTPRequestHandler - chaque requete ferme sa connexion TCP. Avec
+    # les poses, le retour camera et l'etat, cela faisait une quarantaine de
+    # connexions neuves par seconde, et ThreadingHTTPServer cree un fil pour
+    # chacune : du travail et surtout de l'irregularite, sur un processeur
+    # qui a mieux a faire. Toutes les reponses d'ici portent deja un
+    # Content-Length exact, ce que la persistance exige.
+    protocol_version = "HTTP/1.1"
+
+    # TCP_NODELAY. L'algorithme de Nagle retient une petite ecriture jusqu'a
+    # l'acquittement de la precedente : sur une connexion qui se fermait a
+    # chaque reponse, la fermeture forcait l'envoi, mais des qu'elle persiste
+    # le retard apparait - mesure, le pire cas passait de 59 a 96 ms. Les
+    # poses font quelques centaines d'octets et doivent partir tout de suite.
+    disable_nagle_algorithm = True
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=self.racine, **kw)
 
