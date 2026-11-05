@@ -84,7 +84,7 @@ REGLAGES = {
     # correction de perspective : 0 = desactivee (comportement d'origine),
     # 1 = active. Reglable en direct depuis la page, pour comparer les deux
     # sur le meme lancement plutot que de memoire d'une session a l'autre.
-    "deprojection": 0.0,
+    "deprojection": 1.0,
     # periode d'envoi de l'image camera au simulateur, en secondes. Encoder
     # un JPEG coute quelques millisecondes : a 7 images par seconde on ne peut
     # pas se le permettre a chaque image sans perdre de la cadence.
@@ -145,10 +145,10 @@ REGLAGES = {
     # reussite sur 42 essais) : un axe ne bouge que si sa consigne s'ecarte de
     # plus de 2 degres de sa position. C'est la derniere barriere, posee au
     # plus pres du servo, apres tous les autres filtrages.
-    "zone_morte_deg": 2.0,
+    "zone_morte_deg": 0.0,
     # moyenne glissante sur les angles envoyes, en images. Meme source : trois
     # images. Elle n'arrondit que les marches laissees par le seuil ci-dessus.
-    "moyenne_servo": 3,
+    "moyenne_servo": 2,
 
     "x_min": 0.20, "x_max": 0.80,
     # pleine hauteur d'image : toute la course verticale du bras tient entre
@@ -177,11 +177,11 @@ REGLAGES = {
     #     la main laterale commande le deport lateral, independamment. Les
     #     trois zones mortes deviennent alors des millimetres, partout.
     # La verticale n'est pas touchee : elle reste celle du mode polaire.
-    "cartesien": 0.0,
-    "av_min": 120.0, "av_max": 300.0,   # avance devant l'axe de base, en mm
-    "lat_amplitude": 200.0,             # deport lateral, +/- mm
+    "cartesien": 1.0,
+    "av_min": 60.0, "av_max": 320.0,    # avance devant l'axe de base, en mm
+    "lat_amplitude": 280.0,             # deport lateral, +/- mm
     "lat_sens": -1,                     # meme convention que base_sens
-    "ancre_lat_mm": 12.0,               # zone morte laterale, en mm
+    "ancre_lat_mm": 0.0,                # zone morte laterale, en mm
 
     # ouverture de pince, rapport ecart(pouce,index) / taille de main
     "pince_fermee": 0.30,
@@ -201,9 +201,9 @@ REGLAGES = {
     # Seuils par axe, dans l'unite de l'axe. Plus grand = plus ferme, mais la
     # visee devient grossiere. Mesure sur 24 essais a 8 mm de bruit : 16 mm
     # ramene les sauts visibles de 11 % des images a 4 %, pour 120 ms de plus.
-    "ancre_base_deg": 2.5,
-    "ancre_r_mm": 25.0,
-    "ancre_z_mm": 20.0,
+    "ancre_base_deg": 0.0,
+    "ancre_r_mm": 0.0,
+    "ancre_z_mm": 0.0,
     # derive lente DANS la zone morte. A zero, l'hysteresis est franche : sous
     # le seuil le bras ne bouge pas du tout, et aucune derive lente ne passe.
     # C'est au prix d'un decalage residuel qui peut atteindre le seuil.
@@ -218,7 +218,7 @@ REGLAGES = {
     # par seconde, cela plafonnait a 35 deg/s : un balayage de base de 90 deg
     # prenait 2,6 s. Le STM32 rampe deja a 75 deg/s de son cote, c'est lui la
     # vraie limite mecanique - inutile de brider deux fois.
-    "vitesse_max_deg": 12.0,
+    "vitesse_max_deg": 25.0,
 
     # on garde la derniere pose pendant ce temps apres la perte de la main
     "tolerance_perte_s": 0.7,
