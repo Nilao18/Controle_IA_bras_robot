@@ -484,7 +484,13 @@ JOINTS.forEach(function(J){
 function qg(){ return JOINTS.map(function(J){ return gAng(J); }); }
 var blockOn = true, blockedAt = null;
 
-function applyPose(){
+// Deplacer le bras a l'ecran ne coute que cinq rotations. Tout le reste de
+// applyPose - controle de collision, cinematique directe, huit champs de
+// texte, redessin de la zone de portee - coute bien davantage, et n'a aucun
+// besoin d'etre refait soixante fois par seconde. L'interpolation appelle
+// donc poserGeometrie a chaque image, et applyPose seulement quand une
+// nouvelle pose arrive.
+function poserGeometrie(){
   var a = qg();
   gBase.rotation.z = a[0]*D;
   gSh.rotation.y   = a[1]*D;
@@ -494,6 +500,11 @@ function applyPose(){
   gMa.position.y = -ouverture/2;
   gMb.position.y =  ouverture/2;
   tcpNode.position.set(ROT.x, ROT.y, graspZ);
+  return a;
+}
+
+function applyPose(){
+  var a = poserGeometrie();
 
   var p = fk(a, graspZ);
   document.getElementById("tx").textContent = p.x.toFixed(1);
@@ -884,7 +895,7 @@ function loop(t){
   if(spin && last){ cam.th += (t-last)*0.00022; place(); }
   var dt = last ? Math.min(0.1, (t - last) / 1000) : 0;
   last = t;
-  if(LIVE && dt > 0 && interpoler(dt)){ blockedAt = null; applyPose(); }
+  if(LIVE && dt > 0 && interpoler(dt)) poserGeometrie();
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
@@ -932,6 +943,9 @@ function viserServos(vals, ouv){
     for(i = 0; i < JOINTS.length && i < vals.length; i++) JOINTS[i].val = vals[i];
   }
   CIBLE = vals.slice(0, JOINTS.length);
+  blockedAt = null;
+  applyPose();              // lectures, collision et portee : a la cadence
+                            // des poses recues, pas a celle du rendu
   if(typeof ouv === "number"){
     OUV_CIBLE = Math.max(0, Math.min(40, ouv));
     document.getElementById("tOuv").value = OUV_CIBLE;
