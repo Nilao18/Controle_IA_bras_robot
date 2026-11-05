@@ -849,9 +849,42 @@ function resize(){
 addEventListener("resize", resize);
 
 var last = 0;
+// Interpolation de l'affichage.
+//
+// La boucle de pilotage produit une commande toutes les 57 ms environ, la
+// page interrogeait la carte toutes les 100 et posait la pose d'un coup.
+// Les deux cadences n'etant pas harmoniques, un sondage ramassait tantot
+// une commande, tantot deux : le pas affiche alternait du simple au double
+// a 10 Hz. Le bras avancait, hesitait, repartait - alors que les commandes,
+// elles, arrivaient sans un trou.
+//
+// On rend donc a 60 images par seconde en rapprochant la pose affichee de
+// la derniere pose recue, avec une constante de temps. Le coefficient est
+// calcule sur l'intervalle reel, donc independant de la cadence d'affichage.
+var CIBLE = null, OUV_CIBLE = null, TAU_VUE = 0.055;
+
+function interpoler(dt){
+  if(CIBLE === null) return false;
+  var k = dt / (TAU_VUE + dt), bouge = false, i, J;
+  for(i = 0; i < JOINTS.length && i < CIBLE.length; i++){
+    J = JOINTS[i];
+    var d = CIBLE[i] - J.val;
+    if(Math.abs(d) > 0.01){ J.val += k * d; bouge = true; }
+    else if(d !== 0){ J.val = CIBLE[i]; bouge = true; }
+  }
+  if(OUV_CIBLE !== null){
+    var e = OUV_CIBLE - ouverture;
+    if(Math.abs(e) > 0.01){ ouverture += k * e; bouge = true; }
+    else if(e !== 0){ ouverture = OUV_CIBLE; bouge = true; }
+  }
+  return bouge;
+}
+
 function loop(t){
   if(spin && last){ cam.th += (t-last)*0.00022; place(); }
+  var dt = last ? Math.min(0.1, (t - last) / 1000) : 0;
   last = t;
+  if(LIVE && dt > 0 && interpoler(dt)){ blockedAt = null; applyPose(); }
   renderer.render(scene, camera);
   requestAnimationFrame(loop);
 }
@@ -881,13 +914,37 @@ function appliquerServos(vals, ouv){
   blockedAt = null;
   applyPose();
 }
+
+// En direct, on ne pose pas la pose : on donne une cible que la boucle de
+// rendu rejoint a 60 images par seconde. Les curseurs et les valeurs
+// affichees suivent la cible, eux, pour rester lisibles.
+function viserServos(vals, ouv){
+  var i, J;
+  for(i = 0; i < JOINTS.length && i < vals.length; i++){
+    J = JOINTS[i];
+    var v = Math.max(J.min, Math.min(J.max, vals[i]));
+    vals[i] = v;
+    document.getElementById("s_" + J.id).value = v;
+    document.getElementById("v_" + J.id).textContent =
+      v.toFixed(1).replace(".", ",") + "\u00b0";
+  }
+  if(CIBLE === null){                      // premiere pose : pas d'arrivee en glissade
+    for(i = 0; i < JOINTS.length && i < vals.length; i++) JOINTS[i].val = vals[i];
+  }
+  CIBLE = vals.slice(0, JOINTS.length);
+  if(typeof ouv === "number"){
+    OUV_CIBLE = Math.max(0, Math.min(40, ouv));
+    document.getElementById("tOuv").value = OUV_CIBLE;
+    document.getElementById("ouvVal").textContent = OUV_CIBLE.toFixed(0) + " mm";
+  }
+}
 function sondeLive(){
   fetch("etat", {cache:"no-store"}).then(function(r){
     return r.ok ? r.json() : null;
   }).then(function(e){
     if(!e || !e.servos) return;
     liveDernier = Date.now();
-    appliquerServos(e.servos, e.ouverture);
+    viserServos(e.servos, e.ouverture);
     var el = document.getElementById("liveEtat");
     el.textContent = e.source ? e.source : "bras connecté";
     document.getElementById("live").classList.remove("perdu");
@@ -903,7 +960,9 @@ function demarrerLive(){
   spin = false; syncSpin();
   document.getElementById("live").hidden = false;
   document.getElementById("rail").classList.add("verrou");
-  setInterval(sondeLive, 100);
+  // 50 ms : au-dessus de la cadence de pilotage (57 ms), donc chaque
+  // commande est vue. L'interpolation se charge du reste.
+  setInterval(sondeLive, 50);
   sondeLive();
 }
 
