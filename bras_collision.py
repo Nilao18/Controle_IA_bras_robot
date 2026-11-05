@@ -73,6 +73,32 @@ def _compose(A, B):
     return _mm(A[0], B[0]), tuple(_mv(A[0], B[1])[i] + A[1][i] for i in range(3))
 
 
+def _coins(lo, hi):
+    """Les huit sommets du pave [lo, hi]."""
+    c = [(lo[0] if i & 1 else hi[0],
+          lo[1] if i & 2 else hi[1],
+          lo[2] if i & 4 else hi[2]) for i in range(8)]
+    return _np.asarray(c, dtype=_np.float64) if _np is not None else c
+
+
+def _boite_monde(coins, R, t):
+    """Boite alignee sur les axes qui contient le pave local, une fois tourne."""
+    if _np is not None:
+        m = coins @ _np.asarray(R).T + _np.asarray(t)
+        return m.min(axis=0), m.max(axis=0)
+    p = [tuple(_mv(R, c)[i] + t[i] for i in range(3)) for c in coins]
+    return ([min(q[i] for q in p) for i in range(3)],
+            [max(q[i] for q in p) for i in range(3)])
+
+
+def _chevauche(a, b, marge=0.0):
+    """Deux boites alignees se chevauchent-elles ?"""
+    (a0, a1), (b0, b1) = a, b
+    return (a0[0] - marge <= b1[0] and b0[0] - marge <= a1[0] and
+            a0[1] - marge <= b1[1] and b0[1] - marge <= a1[1] and
+            a0[2] - marge <= b1[2] and b0[2] - marge <= a1[2])
+
+
 class Collisions:
     def __init__(self, data_path: str = DATA_PATH, params_path: str = PARAMS_PATH):
         with open(data_path, "r", encoding="utf-8") as f:
@@ -96,6 +122,30 @@ class Collisions:
                 vol = base64.b64decode(p["volume"])
             self.pieces[k] = {"nom": p["nom"], "n": n, "pts": pts,
                               "lo": p["lo"], "dim": p["dim"], "vol": vol}
+
+        # Boites englobantes locales, et leurs huit sommets.
+        #
+        # Le controle coutait 26 ms sur la carte : 24 paires testees dans les
+        # deux sens, soit 48 transformations de nuage complet. Or deux pieces
+        # eloignees n'ont aucune chance de se penetrer. On transforme donc
+        # d'abord les huit sommets du pave englobant - une soixantaine de
+        # points pour tout le bras - et on ne touche aux nuages que pour les
+        # paires dont les boites se chevauchent vraiment.
+        #
+        # Un pave tourne plutot qu'une sphere : les segments de bras sont
+        # longs et minces, et leur sphere englobante est enorme alors que
+        # leur pave reste juste.
+        for k, p in self.pieces.items():
+            if _np is not None:
+                lo_p = p["pts"].min(axis=0)
+                hi_p = p["pts"].max(axis=0)
+            else:
+                lo_p = [min(q[i] for q in p["pts"]) for i in range(3)]
+                hi_p = [max(q[i] for q in p["pts"]) for i in range(3)]
+            lo_v = list(p["lo"])
+            hi_v = [p["lo"][i] + p["dim"][i] * self.vox for i in range(3)]
+            p["coins_pts"] = _coins(lo_p, hi_p)
+            p["coins_vol"] = _coins(lo_v, hi_v)
 
         with open(params_path, "r", encoding="utf-8") as f:
             q = json.load(f)
@@ -169,14 +219,39 @@ class Collisions:
     def verifier_angles(self, angles: Sequence[float], ouverture: float = 0.0) -> Optional[str]:
         """Angles geometriques. Rend None si la pose est saine, sinon le contact."""
         T = self._reperes(angles, ouverture)
-        W = {k: self._monde(k, T) for k in self.pieces}
+        bp, bv = {}, {}
+        for k, p in self.pieces.items():
+            R, t = T[k]
+            bp[k] = _boite_monde(p["coins_pts"], R, t)
+            bv[k] = _boite_monde(p["coins_vol"], R, t)
+
+        # nuages transformes a la demande : la plupart des paires sont ecartees
+        # sur les boites, et leur nuage n'a alors jamais a etre calcule
+        W = {}
+
+        def monde(k):
+            if k not in W:
+                W[k] = self._monde(k, T)
+            return W[k]
+
+        self.paires_vues = 0
         for a, b in PAIRES:
-            if (self._dedans(b, W[a], *T[b]) >= MIN_POINTS or
-                    self._dedans(a, W[b], *T[a]) >= MIN_POINTS):
-                return f"{self.pieces[a]['nom']} / {self.pieces[b]['nom']}"
+            if _chevauche(bp[a], bv[b]):
+                self.paires_vues += 1
+                if self._dedans(b, monde(a), *T[b]) >= MIN_POINTS:
+                    return f"{self.pieces[a]['nom']} / {self.pieces[b]['nom']}"
+            if _chevauche(bp[b], bv[a]):
+                self.paires_vues += 1
+                if self._dedans(a, monde(b), *T[a]) >= MIN_POINTS:
+                    return f"{self.pieces[a]['nom']} / {self.pieces[b]['nom']}"
         x0, x1, y0, y1, zb = self.boitier
+        boite_boitier = ((x0, y0, -1e6), (x1, y1, zb))
         for k in MOBILES:
-            P = W[k]
+            lo, hi = bp[k]
+            # ni sous la table, ni dans l'emprise du boitier : rien a compter
+            if lo[2] >= 0.0 and not _chevauche(bp[k], boite_boitier):
+                continue
+            P = monde(k)
             if _np is not None:
                 sous = (P[:, 2] < 0).sum()
                 dans = ((P[:, 0] > x0) & (P[:, 0] < x1) & (P[:, 1] > y0) &

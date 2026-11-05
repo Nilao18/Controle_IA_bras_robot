@@ -1193,6 +1193,14 @@ class Resolveur:
         # autant le savoir avant d'optimiser au hasard
         self.essais = 0
         self.branches = 0
+        # Memoire de la derniere consigne. Les ancres imposent une zone morte
+        # avant la cinematique : main immobile, (x, y, z) est rigoureusement
+        # identique d'une image a l'autre, au bit pres, et on recalculait
+        # pourtant la meme pose et les memes collisions. C'est precisement
+        # quand on vise soigneusement qu'on payait pour rien.
+        self._cle = None
+        self._res = (None, 0.0)
+        self.reprises = 0
 
     def _offsets(self):
         o = [0.0]
@@ -1207,6 +1215,9 @@ class Resolveur:
 
     def __call__(self, x, y, z):
         from bras_ik import PINCE_BAS
+        if (x, y, z) == self._cle:
+            self.reprises += 1
+            return self._res
         for d in self._offsets():
             self.essais += 1
             sols = self.b.ik_toutes(x, y, z, orientation=PINCE_BAS + d,
@@ -1219,8 +1230,10 @@ class Resolveur:
                                             zip(s.servos, self.precedent)))
             self.precedent = sols[0].servos
             self.ecart_precedent = d
-            return sols[0], d
-        return None, 0.0
+            self._cle, self._res = (x, y, z), (sols[0], d)
+            return self._res
+        self._cle, self._res = (x, y, z), (None, 0.0)
+        return self._res
 
 
 def _dessiner(main, img, reperes):
@@ -1717,8 +1730,9 @@ def principal(args) -> int:
                       f"  + cinematique {1000*cum['ik']/ki:5.1f}"
                       f"  + sortie {1000*cum['out']/ki:5.1f} ms"
                       f"   |  orientations essayees {resoudre.essais/ki:.1f}"
-                      f"   branches {resoudre.branches/ki:.1f}")
-                resoudre.essais = resoudre.branches = 0
+                      f"   branches {resoudre.branches/ki:.1f}"
+                      f"   reprises {100*resoudre.reprises/ki:3.0f} %")
+                resoudre.essais = resoudre.branches = resoudre.reprises = 0
                 cum = {"n": 0, "age": 0.0, "cap": 0.0,
                        "det": 0.0, "tour": 0.0, "cmd": 0.0,
                        "ik": 0.0, "out": 0.0, "nik": 0}
