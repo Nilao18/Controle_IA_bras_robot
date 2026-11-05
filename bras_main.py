@@ -165,9 +165,12 @@ REGLAGES = {
     # que soit la cadence - c'est donc en temps qu'il faut l'exprimer pour
     # qu'il garde le meme sens.
     #
-    # Constante de temps d'un filtre du premier ordre : le retard introduit
-    # vaut a peu pres tau. 60 ms reproduisent le reglage trouve a la main,
-    # qui donnait 59 ms de retard a 17 images par seconde.
+    # Retard introduit par le lissage, en MILLISECONDES et non en nombre
+    # d'images. Compte en images, le reglage ment des qu'on change la
+    # cadence : trois images retardaient de 111 ms a 9 images par seconde et
+    # de 59 ms a 17. Le nombre d'images est donc recalcule a partir de la
+    # cadence mesuree, ce qui redonne 2 images a 9 img/s et 3 a 17 - soit
+    # exactement le reglage trouve a la main.
     "lissage_ms": 60.0,
 
     "x_min": 0.20, "x_max": 0.80,
@@ -1717,7 +1720,9 @@ def principal(args) -> int:
             garder_molettes(molettes)
 
     envoyes = None
-    sortie = None           # etat du lissage, conserve entre les images
+    sortie = None           # derniere pose publiee
+    recents = []            # images moyennees par le lissage
+    dt_lisse = 0.10         # intervalle entre images, lisse
     derniere_main = 0.0
     dernier_controle = 0.0
     dernier_expo = 0.0
@@ -1813,22 +1818,30 @@ def principal(args) -> int:
             envoyes = _limiter(sol.servos, envoyes,
                                r["vitesse_max_deg_s"] * dt_cmd,
                                r["zone_morte_deg"])
-            # Lissage a constante de temps plutot que moyenne sur une fenetre
-            # de duree fixe. La fenetre gardait "les images des N dernieres
-            # millisecondes", donc 2 ou 3 images selon la gigue de cadence :
-            # a 17 img/s, trois images s'etalent sur 114 ms et quatre sur 171,
-            # on tombait pile sur la frontiere. La moyenne de 2 echantillons
-            # bruites n'etant pas celle de 3, la bascule faisait sauter la
-            # sortie a main immobile - le lissage devenait lui-meme une source
-            # de tremblement. Un filtre du premier ordre n'a pas de notion de
-            # nombre d'echantillons, donc pas de marche a franchir, et reste
-            # independant de la cadence par construction.
-            tau = r["lissage_ms"] / 1000.0
-            if sortie is None or tau <= 0.0:
-                sortie = list(envoyes)
-            else:
-                k = dt_cmd / (tau + dt_cmd)
-                sortie = [s + k * (e - s) for s, e in zip(sortie, envoyes)]
+            # Moyenne glissante sur un NOMBRE d'images, ce nombre etant
+            # deduit de la cadence pour que le retard reste le meme quand
+            # elle change.
+            #
+            # Ce qui se voit comme une saccade n'est pas le bruit residuel
+            # mais le PAS d'une image a l'autre, et les deux ne vont pas
+            # ensemble. Une moyenne sur trois images etale chaque variation
+            # de la consigne sur trois images : le pas vaut un tiers de
+            # l'ecart. Un filtre du premier ordre de meme attenuation de
+            # bruit deplace la sortie de la MOITIE de l'ecart d'un coup -
+            # 0,142 degre de pas contre 0,118, mesure sur consigne immobile
+            # a 17 img/s. Le bruit residuel, lui, est identique : c'est en ne
+            # regardant que lui qu'on se trompe de filtre.
+            #
+            # La cadence est lissee avant d'en deduire le nombre d'images.
+            # Calcule sur l'intervalle brut, ce nombre basculerait entre deux
+            # et trois a chaque gigue, et la bascule se verrait a son tour.
+            dt_lisse += 0.05 * (dt_cmd - dt_lisse)
+            n_moy = _borne(round(2.0 * r["lissage_ms"] / 1000.0 / dt_lisse) + 1,
+                           1, 32)
+            recents.append(list(envoyes))
+            del recents[:-int(n_moy)]
+            sortie = [sum(p[i] for p in recents) / len(recents)
+                      for i in range(len(envoyes))]
 
             if fil_vue is not None and t > prochaine_vue:
                 prochaine_vue = t + r["periode_vue_s"]
@@ -1888,7 +1901,8 @@ def principal(args) -> int:
                 print(f"       dont  commandes {1000*cum['cmd']/ki:5.1f}"
                       f"  + cinematique {1000*cum['ik']/ki:5.1f}"
                       f"  + sortie {1000*cum['out']/ki:5.1f} ms"
-                      f"   |  orientations essayees {resoudre.essais/ki:.1f}"
+                      f"   |  lissage {int(n_moy)} img"
+                      f"   orientations essayees {resoudre.essais/ki:.1f}"
                       f"   branches {resoudre.branches/ki:.1f}"
                       f"   reprises {100*resoudre.reprises/ki:3.0f} %")
                 resoudre.essais = resoudre.branches = resoudre.reprises = 0
