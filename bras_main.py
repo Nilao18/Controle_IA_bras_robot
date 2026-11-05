@@ -232,7 +232,10 @@ REGLAGES = {
     # C'est au prix d'un decalage residuel qui peut atteindre le seuil.
     "ancre_rattrapage": 0.0,
     # passe-bas leger APRES l'ancre, juste pour arrondir ses marches
-    "ancre_coupure": 0.6,
+    # 0 = pas de passe-bas apres l'ancre. Voir Lisseur : a 0,6 Hz ce filtre
+    # retardait de 265 ms main posee et de 35 ms main rapide, soit un rapport
+    # de huit entre viser et deplacer.
+    "ancre_coupure": 0.0,
     "ancre_beta": 0.02,
 
 
@@ -279,7 +282,7 @@ MOLETTES = ("deprojection", "cartesien",
             "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "ancre_lat_mm",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
-            "lissage_ms",
+            "lissage_ms", "ancre_coupure",
             "x_min", "x_max", "y_min", "y_max")
 
 
@@ -505,14 +508,33 @@ class Ancre:
 
 
 class Lisseur:
-    """Ancre, puis un passe-bas leger pour arrondir ses marches."""
+    """Ancre, puis un passe-bas optionnel pour arrondir ses marches.
+
+    Le passe-bas etait un filtre « un euro » a 0,6 Hz, soit 265 ms de
+    constante de temps main posee. Sa coupure vaut 0,6 + 0,02 x vitesse :
+    main rapide elle monte a 4,6 Hz, soit 35 ms, main lente elle retombe a
+    0,6 et le retard est multiplie par huit.
+
+    Autrement dit, plus on cherchait la precision, plus le bras devenait
+    lent : on ralentit pour viser, le filtre se referme, le bras traine d'un
+    quart de seconde, on corrige, et ce mouvement rapide rouvre le filtre et
+    fait partir le bras d'un coup. C'est ce va-et-vient qui se voyait comme
+    une saccade, et il etait en amont de la limite de vitesse comme du
+    lissage de sortie - les toucher n'y changeait rien.
+
+    Il avait un sens a 9 images par seconde, quand il n'y avait rien d'autre.
+    Depuis, la limite de vitesse en degres par seconde et la moyenne
+    glissante de sortie font ce travail sans dependre de la vitesse de la
+    main. A coupure nulle, l'ancre sort directement.
+    """
 
     def __init__(self, seuil, rattrapage, coupure, beta):
         self.ancre = Ancre(seuil, rattrapage)
-        self.filtre = UnEuro(coupure, beta)
+        self.filtre = UnEuro(coupure, beta) if coupure > 0.0 else None
 
     def __call__(self, x, t):
-        return self.filtre(self.ancre(x), t)
+        y = self.ancre(x)
+        return self.filtre(y, t) if self.filtre is not None else y
 
 
 class Porte:
@@ -1707,6 +1729,9 @@ def principal(args) -> int:
             molettes[cle] = r[cle] = val
             if cle in seuils:
                 seuils[cle].ancre.seuil = val
+            if cle == "ancre_coupure":
+                for f in seuils.values():
+                    f.filtre = UnEuro(val, r["ancre_beta"]) if val > 0 else None
             if cle == "cartesien":
                 # on change d'unites : les ancres du mode qu'on prend gardent
                 # la position de la main d'il y a plusieurs secondes, ce qui
