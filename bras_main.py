@@ -42,6 +42,14 @@ REGLAGES = {
     # commandes. On fixe, et --flip permet d'essayer.
     "flip": 0,
 
+    # Fils de calcul laisses a MediaPipe. Sur Linux il n'en prend qu'UN, en
+    # dur dans inference_calculator_utils.cc, alors que sur Android il prend
+    # la moitie des coeurs. Mesure sur la carte, une detection coutait 81,3 ms
+    # par defaut, 46,8 a deux fils, 36,9 a trois et 31,7 a quatre.
+    # Trois plutot que quatre : il reste un coeur pour le fil de capture et
+    # le fil de vue, qui sinon se disputent le processeur avec la detection.
+    "fils_detection": 3,
+
     # La profondeur vient de la racine de l'aire de la paume, en pixels.
     #
     # Mesure sur 221 images de cette camera, main immobile : cet indice est le
@@ -218,7 +226,24 @@ REGLAGES = {
     # par seconde, cela plafonnait a 35 deg/s : un balayage de base de 90 deg
     # prenait 2,6 s. Le STM32 rampe deja a 75 deg/s de son cote, c'est lui la
     # vraie limite mecanique - inutile de brider deux fois.
-    "vitesse_max_deg": 25.0,
+    # Vitesse en degres PAR SECONDE, et non par image.
+    #
+    # Par image, le reglage ment des qu'on change la cadence : 8 deg/image
+    # valent 75 deg/s a 9 images par seconde et 160 deg/s a 20, sans que rien
+    # ne previenne. Le simulateur montrerait alors un bras deux fois plus
+    # rapide que la realite. Multiplie par l'intervalle reel entre deux
+    # commandes, le chiffre garde le meme sens quelle que soit la cadence.
+    #
+    # 75 deg/s est la rampe appliquee par le STM32. C'est le seul chiffre
+    # reel : la vitesse propre des servos n'est pas documentee ici, et
+    # l'inertie du bras ne se devine pas. A revoir bras cable, en regardant
+    # le depassement et le courant.
+    "vitesse_max_deg_s": 75.0,
+
+    # bornes sur l'intervalle servant a cette limite. Apres une perte de main
+    # de trois secondes, l'intervalle brut autoriserait un saut de 225 degres,
+    # c'est-a-dire aucune limite au moment ou elle sert le plus.
+    "pas_mini_s": 0.02, "pas_maxi_s": 0.20,
 
     # on garde la derniere pose pendant ce temps apres la perte de la main
     "tolerance_perte_s": 0.7,
@@ -231,7 +256,7 @@ NOMS = ("base", "epaule", "coude", "inclinaison", "rotation")
 # impraticable : une valeur se juge sur dix prises de jeton, pas sur une.
 MOLETTES = ("deprojection", "cartesien",
             "ancre_r_mm", "ancre_z_mm", "ancre_base_deg", "ancre_lat_mm",
-            "zone_morte_deg", "vitesse_max_deg", "base_amplitude",
+            "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
             "moyenne_servo",
             "x_min", "x_max", "y_min", "y_max")
@@ -552,6 +577,70 @@ def _inclinaison(monde):
     return abs(float(n[2])) / nn if nn > 1e-9 else None
 
 
+def forcer_fils_mediapipe(n: int) -> str:
+    """Donne n fils de calcul a MediaPipe. Rend un compte rendu lisible.
+
+    Sur Linux, MediaPipe n'utilise qu'UN fil, en dur :
+
+        #if defined(MEDIAPIPE_ANDROID) || defined(MEDIAPIPE_IOS) || ...
+          return std::clamp(NumCPUCores() / 2, 1, 4);
+        #else
+          return 1;
+        #endif
+
+    (inference_calculator_utils.cc). Sur Android il prend la moitie des
+    coeurs ; la carte est un Linux aarch64 a quatre coeurs et tombe du
+    mauvais cote du #if. Mesure sur la carte : 81,3 ms par defaut, 36,9 a
+    trois fils.
+
+    Le graphe sait recevoir la consigne - le noeud InferenceCalculator porte
+    `delegate { xnnpack {} }` et GetXnnpackNumThreads lit
+    delegate.xnnpack.num_threads des qu'il vaut autre chose que -1 - mais ce
+    champ est imbrique a trois niveaux, alors que le calculator_params de
+    l'API Python n'accepte qu'un seul niveau. On intercepte donc
+    _modify_calculator_options, qui recoit le graphe canonique juste avant
+    la construction.
+
+    Cette interception repose sur des details internes de MediaPipe. En cas
+    d'echec on le dit et on continue au reglage par defaut : perdre de la
+    cadence vaut mieux que ne pas demarrer.
+    """
+    if n <= 0:
+        return "fils de detection : reglage par defaut de MediaPipe"
+    try:
+        import mediapipe.python.solution_base as sb
+        from mediapipe.calculators.tensor import inference_calculator_pb2 as icp
+    except Exception as e:
+        return "fils de detection : impossible (%s)" % e
+
+    ext = icp.InferenceCalculatorOptions.ext
+    original = sb.SolutionBase._modify_calculator_options
+    if getattr(original, "_pose_par_nous", False):
+        return "fils de detection : deja a %d" % n
+
+    def patche(self, cfg, params):
+        original(self, cfg, params)
+        for node in cfg.node:
+            if "InferenceCalculator" not in node.calculator:
+                continue
+            pose = False
+            for brut in node.node_options:
+                if brut.Is(icp.InferenceCalculatorOptions.DESCRIPTOR):
+                    o = icp.InferenceCalculatorOptions()
+                    brut.Unpack(o)
+                    o.delegate.xnnpack.num_threads = n
+                    brut.Pack(o)
+                    pose = True
+            if not pose:
+                node.options.Extensions[ext].delegate.xnnpack.num_threads = n
+            patche.noeuds += 1
+
+    patche._pose_par_nous = True
+    patche.noeuds = 0
+    sb.SolutionBase._modify_calculator_options = patche
+    return "fils de detection : %d" % n
+
+
 class FilCapture(threading.Thread):
     """Vide la file de tampons V4L2 et ne garde que la derniere image.
 
@@ -614,6 +703,9 @@ class Main:
         import cv2
         import mediapipe as mp
         self.cv2, self.mp = cv2, mp
+        # avant toute construction de graphe : une fois `Hands` construit,
+        # le nombre de fils est fige
+        print(forcer_fils_mediapipe(int(REGLAGES["fils_detection"])))
 
         if device < 0:
             device = trouver_camera(largeur, hauteur)
@@ -1581,7 +1673,7 @@ def principal(args) -> int:
     # cumuls de chronometrage, remis a zero a chaque bilan
     cum = {"n": 0, "age": 0.0, "cap": 0.0, "det": 0.0, "tour": 0.0,
            "cmd": 0.0, "ik": 0.0, "out": 0.0, "nik": 0}
-    t_tour = time.time()
+    t_tour = t_commande = time.time()
     distances = []
     t0 = time.time()
     prochain_apercu = 0.0
@@ -1664,7 +1756,10 @@ def principal(args) -> int:
             if sol is None:
                 continue
             n_ik += 1
-            envoyes = _limiter(sol.servos, envoyes, r["vitesse_max_deg"],
+            dt_cmd = _borne(t - t_commande, r["pas_mini_s"], r["pas_maxi_s"])
+            t_commande = t
+            envoyes = _limiter(sol.servos, envoyes,
+                               r["vitesse_max_deg_s"] * dt_cmd,
                                r["zone_morte_deg"])
             recents.append(list(envoyes))
             recents = recents[-max(1, int(r["moyenne_servo"])):]
@@ -1766,6 +1861,8 @@ if __name__ == "__main__":
     p.add_argument("--deprojection", action="store_true",
                    help="demarrer avec la correction de perspective active "
                         "(reglable ensuite depuis la page)")
+    p.add_argument("--fils", type=int, default=None,
+                   help="fils de calcul laisses a MediaPipe (0 = defaut)")
     p.add_argument("--capture-directe", action="store_true",
                    help="lire la camera dans la boucle, sans fil separe : "
                         "le comportement d'avant, pour comparer")
@@ -1780,4 +1877,6 @@ if __name__ == "__main__":
         REGLAGES["deprojection"] = 1.0
     if a.cartesien:
         REGLAGES["cartesien"] = 1.0
+    if a.fils is not None:
+        REGLAGES["fils_detection"] = a.fils
     raise SystemExit(principal(a))
