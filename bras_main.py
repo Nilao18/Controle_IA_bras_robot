@@ -245,6 +245,17 @@ REGLAGES = {
     # raccourcissent pas pareil - donc viser une ouverture precise demandait
     # de tenir la main de face. Les seuils sont des fractions de la course
     # calibree ; ils sont distincts pour que la pince ne batte pas autour.
+    # Veille par geste : poing, paume ouverte, poing. L'indicateur est
+    # l'allongement des doigts rapporte a la taille de la paume - environ 2
+    # main ouverte, environ 1 poing ferme. Les deux seuils laissent entre eux
+    # une zone neutre ou l'automate n'avance pas : sans elle, une main a
+    # mi-chemin le ferait progresser au gre du bruit.
+    "veille_poing": 1.25,
+    "veille_paume": 1.75,
+    "veille_tenu_s": 0.18,          # duree mini de chaque etat
+    "veille_fenetre_s": 3.0,        # duree maxi de toute la sequence
+    "pose_repliee": (90.0, 0.0, 0.0, 0.0, 90.0),
+
     "pince_binaire": 1.0,
     "pince_seuil_bas": 0.30,        # en dessous : on ferme
     "pince_seuil_haut": 0.65,       # au-dessus : on rouvre
@@ -333,6 +344,7 @@ MOLETTES = ("deprojection", "cartesien",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
             "lissage_ms", "ancre_coupure", "periode_vue_s",
             "redressement", "pince_binaire",
+            "veille_poing", "veille_paume",
             "pince_seuil_bas", "pince_seuil_haut",
             "rattrapage", "ancre_rattrapage", "acceleration",
             "x_min", "x_max", "y_min", "y_max")
@@ -965,6 +977,7 @@ class Main:
         self.expo_courante = None     # temps de pose en cours, pour les pas
         self.expo_bornes = (1, 5000)
         self.objectif = charger_objectif()
+        self.etendue = None      # allongement des doigts
         self.fil = None
         if filee:
             self.fil = FilCapture(self.cap)
@@ -1118,7 +1131,9 @@ class Main:
             self.derniere_distance = dist
         if dist is None:
             return None
+        self.etendue = _etendue_doigts(lm, w, h, a)
         return {"x": cx, "y": cy, "taille": taille, "pince": pince,
+                "etendue": self.etendue,
                 "distance": dist}
 
     def annoter(self, chemin: str) -> None:
@@ -1468,6 +1483,76 @@ def _deprojeter(m: dict, r: dict):
         return x, y
     k = m["distance"] / r["ref_distance_m"]
     return 0.5 + (x - 0.5) * k, 0.5 + (y - 0.5) * k
+
+
+def _etendue_doigts(lm, w, h, travee):
+    """Allongement des quatre doigts, rapporte a la taille de la paume.
+
+    Distance poignet -> bout de chaque doigt, divisee par la travee
+    poignet -> articulations. Main ouverte, le bout d'un doigt est environ
+    deux fois plus loin que son articulation ; poing ferme, il revient
+    pratiquement dessus. Le rapport passe donc de ~2 a ~1, un ecart enorme
+    que ni l'orientation ni le bruit ne franchissent.
+
+    Le pouce est exclu : replie dans le poing, MediaPipe le place mal.
+    """
+    if not travee:
+        return None
+    d = sum(math.hypot((lm[k].x - lm[0].x) * w, (lm[k].y - lm[0].y) * h)
+            for k in (8, 12, 16, 20)) / 4.0
+    return d / travee
+
+
+class Veille:
+    """Mise en veille par un geste : poing, paume ouverte, poing.
+
+    Un geste volontaire doit etre impossible a produire par accident. Une
+    seule paume ouverte arrive cent fois par session ; la sequence fermee -
+    ouverte - fermee, chaque etat tenu un instant et le tout dans une fenetre
+    de temps, ne se produit pas toute seule.
+
+    L'indicateur est l'allongement des doigts, et les deux seuils sont
+    separes : ce qui compte comme un poing et ce qui compte comme une paume
+    laissent entre eux une zone neutre ou rien ne progresse. Sans elle, une
+    main a mi-chemin ferait avancer l'automate au gre du bruit.
+    """
+
+    def __init__(self):
+        self.active = False
+        self.etape = 0          # 0 attente, 1 poing vu, 2 paume vue
+        self.depuis = 0.0       # debut de la sequence
+        self.tenu = 0.0         # depuis quand l'etat courant est tenu
+        self.dernier = None     # "poing", "paume" ou None
+        self.bascules = 0
+
+    def __call__(self, etendue, t, r):
+        if etendue is None:
+            return False
+        if etendue < r["veille_poing"]:
+            etat = "poing"
+        elif etendue > r["veille_paume"]:
+            etat = "paume"
+        else:
+            return False                     # zone neutre : rien ne bouge
+        if etat != self.dernier:
+            self.dernier, self.tenu = etat, t
+            return False
+        if t - self.tenu < r["veille_tenu_s"]:
+            return False                     # pas encore tenu assez longtemps
+
+        if self.etape and t - self.depuis > r["veille_fenetre_s"]:
+            self.etape = 0                   # trop lent : la sequence expire
+        if self.etape == 0 and etat == "poing":
+            self.etape, self.depuis = 1, t
+        elif self.etape == 1 and etat == "paume":
+            self.etape = 2
+        elif self.etape == 2 and etat == "poing":
+            self.etape = 0
+            self.dernier, self.tenu = None, t
+            self.active = not self.active
+            self.bascules += 1
+            return True
+        return False
 
 
 class Pince:
@@ -2075,6 +2160,7 @@ def principal(args) -> int:
             garder_molettes(molettes)
 
     envoyes = None
+    veille = Veille()       # mise en veille par geste
     vitesses = [0.0] * 5    # etat de la rampe, en degres par seconde
     sortie = None           # derniere pose publiee
     recents = []            # images moyennees par le lissage
@@ -2148,6 +2234,35 @@ def principal(args) -> int:
             n_main += 1
             derniere_main = t
             t_cmd = time.time()
+
+            if veille(m.get("etendue"), t, r):
+                print("  veille : %s" % ("ACTIVEE, bras replie" if veille.active
+                                         else "levee, reprise du pilotage"))
+            if veille.active:
+                # Repliee et sourde : on ne suit plus la main, mais la boucle
+                # continue de tourner - il faut bien voir le geste de reveil.
+                # La rampe amene le bras a la pose repliee sans a-coup, et la
+                # cinematique inverse n'a rien a faire ici.
+                vise = list(r["pose_repliee"])
+                dt_cmd = _borne(t - t_commande, r["pas_mini_s"], r["pas_maxi_s"])
+                t_commande = t
+                if envoyes is None:
+                    envoyes, vitesses = list(vise), [0.0] * len(vise)
+                else:
+                    g = r["vitesse_max_deg_s"]
+                    vmax = [min(g, v) for v in r["vitesses_max_deg_s"]]
+                    amax = (list(r["accelerations_deg_s2"]) if r["acceleration"]
+                            else [0.0] * len(vmax))
+                    envoyes, vitesses = _rampe(vise, envoyes, vitesses, dt_cmd,
+                                               vmax, amax)
+                sortie = list(envoyes)
+                recents = []
+                if visu:
+                    visu.publier(sortie, ouverture=0.0, source="veille")
+                if moteurs:
+                    moteurs.envoyer(sortie)
+                    moteurs.pince_mm(0.0)
+                continue
 
             if r["cartesien"]:
                 av, lat, co, dmm = commandes_cartesien(m, cal, r)
@@ -2243,6 +2358,8 @@ def principal(args) -> int:
                                    {"x": round(m["x"], 3), "y": round(m["y"], 3),
                                     "x corrige": round(m.get("x_corr", m["x"]), 3),
                                     "y corrige": round(m.get("y_corr", m["y"]), 3),
+                                    "doigts": (round(m["etendue"], 2)
+                                               if m.get("etendue") else "-"),
                                     "distance_mm": round(1000 * m["distance"]),
                                     "R_mm": round(cr), "Z_mm": round(cz),
                                     "base_deg": round(cb, 1),
@@ -2275,6 +2392,7 @@ def principal(args) -> int:
                       f"  lum {main.lum:.0f}"
                       f"  cos {main.cos_t or 0:.2f}"
                       f"  expo {main.reglages_expo}"
+                      f"{'  VEILLE' if veille.active else ''}"
                       )
                 k = max(cum["n"], 1)
                 tour = 1000.0 * cum["tour"] / k
