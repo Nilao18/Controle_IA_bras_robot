@@ -167,22 +167,37 @@ def principal(a) -> int:
                     gris, coins, (11, 11), (-1, -1),
                     (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001))
                 cv2.drawChessboardCorners(vue, COINS, coins, trouve)
-                centre = coins.reshape(-1, 2).mean(axis=0)
-                neuf = all(np.hypot(*(centre - c)) > a.ecart for c in vignettes)
+                # Nouveaute : position ET forme apparente. La position
+                # seule refusait deux prises au meme endroit sous des angles
+                # differents - or c'est precisement l'inclinaison qui separe
+                # la focale de la distance. L'encombrement du damier dans
+                # l'image encode cette inclinaison : incline, il se raccourcit
+                # dans une direction et pas dans l'autre.
+                p = coins.reshape(-1, 2)
+                centre = p.mean(axis=0)
+                lo, hi = p.min(axis=0), p.max(axis=0)
+                trait = np.array([centre[0] / forme[0], centre[1] / forme[1],
+                                  (hi[0] - lo[0]) / forme[0],
+                                  (hi[1] - lo[1]) / forme[1]])
+                neuf = all(np.hypot(*(trait[:2] - v[:2])) > a.ecart
+                           or np.hypot(*(trait[2:] - v[2:])) > a.forme
+                           for v in vignettes)
                 if not neuf:
-                    etat = "deja vu d'ici - deplace le damier ailleurs"
+                    etat = ("deja vu ainsi - deplace le damier, "
+                            "ou incline-le autrement")
                 elif t - dernier < 1.0:
                     etat = "..."
                 else:
                     monde.append(grille.copy())
                     image.append(coins)
-                    vignettes.append(centre)
+                    vignettes.append(trait)
                     dernier = t
                     etat = "VUE %d / %d prise" % (len(monde), a.vues)
                     print("   %s  (centre %4.0f, %4.0f)"
                           % (etat, centre[0], centre[1]))
-            for c in vignettes:
-                cv2.circle(vue, (int(c[0]), int(c[1])), 6, (0, 200, 255), 2)
+            for v in vignettes:
+                cv2.circle(vue, (int(v[0] * forme[0]), int(v[1] * forme[1])),
+                           6, (0, 200, 255), 2)
             ok2, buf = cv2.imencode(".jpg", vue, [cv2.IMWRITE_JPEG_QUALITY, 70])
             _vue.poser(buf.tobytes() if ok2 else None,
                        "%d / %d   %s" % (len(monde), a.vues, etat))
@@ -240,11 +255,13 @@ if __name__ == "__main__":
     p.add_argument("--device", type=int, default=0)
     p.add_argument("--largeur", type=int, default=640)
     p.add_argument("--hauteur", type=int, default=480)
-    p.add_argument("--vues", type=int, default=15)
+    p.add_argument("--vues", type=int, default=20)
     p.add_argument("--case", type=float, default=CASE_MM,
                    help="cote d'une case en mm, mesure sur l'impression")
-    p.add_argument("--ecart", type=float, default=60.0,
-                   help="distance mini entre deux vues, en pixels")
+    p.add_argument("--ecart", type=float, default=0.09,
+                   help="deplacement mini entre deux vues, en fraction d'image")
+    p.add_argument("--forme", type=float, default=0.07,
+                   help="changement mini d'encombrement, en fraction d'image")
     p.add_argument("--manuel", action="store_true",
                    help="ne pas toucher a l'exposition de la camera")
     p.add_argument("--port", type=int, default=8080)
