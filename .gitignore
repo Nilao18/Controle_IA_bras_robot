@@ -8,6 +8,8 @@
 !orientation.py
 !analyse.py
 !fils_detection.py
+!calibrer_objectif.py
+!damier_calibration.pdf
 !mesure_profondeur.py
 !viewer/
 !sketch/
