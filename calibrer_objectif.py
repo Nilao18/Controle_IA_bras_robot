@@ -142,6 +142,14 @@ def principal(a) -> int:
     grille[:, :2] = np.mgrid[0:COINS[0], 0:COINS[1]].T.reshape(-1, 2) * a.case
 
     monde, image, vignettes = [], [], []
+    # Couverture : ce qui compte pour la distorsion, ce n'est pas ou se
+    # trouve le CENTRE du damier - il ne peut jamais approcher les bords,
+    # puisque le damier entier doit rester dans le cadre - mais ou se
+    # trouvent les COINS detectes. On suit donc une grille de cases et on
+    # marque celles qu'au moins un coin a visitees.
+    GC, GL = 8, 6
+    couvert = [[False] * GC for _ in range(GL)]
+    tous = []
     dernier = 0.0
     forme = None
     print("Montre le damier a la camera. Une vue est prise quand il est vu")
@@ -191,16 +199,32 @@ def principal(a) -> int:
                     monde.append(grille.copy())
                     image.append(coins)
                     vignettes.append(trait)
+                    for q in p:
+                        tous.append((q[0], q[1]))
+                        ci = min(GC - 1, max(0, int(q[0] * GC / forme[0])))
+                        li = min(GL - 1, max(0, int(q[1] * GL / forme[1])))
+                        couvert[li][ci] = True
                     dernier = t
                     etat = "VUE %d / %d prise" % (len(monde), a.vues)
                     print("   %s  (centre %4.0f, %4.0f)"
                           % (etat, centre[0], centre[1]))
-            for v in vignettes:
-                cv2.circle(vue, (int(v[0] * forme[0]), int(v[1] * forme[1])),
-                           6, (0, 200, 255), 2)
+            # les cases encore vierges, en rouge : la ou il faut aller
+            for li in range(GL):
+                for ci in range(GC):
+                    if couvert[li][ci]:
+                        continue
+                    x1 = int(ci * forme[0] / GC) + 1
+                    y1 = int(li * forme[1] / GL) + 1
+                    x2 = int((ci + 1) * forme[0] / GC) - 1
+                    y2 = int((li + 1) * forme[1] / GL) - 1
+                    cv2.rectangle(vue, (x1, y1), (x2, y2), (40, 40, 220), 1)
+            for q in tous[-1200:]:
+                cv2.circle(vue, (int(q[0]), int(q[1])), 1, (0, 200, 255), -1)
+            n_couv = sum(sum(1 for c in l if c) for l in couvert)
             ok2, buf = cv2.imencode(".jpg", vue, [cv2.IMWRITE_JPEG_QUALITY, 70])
             _vue.poser(buf.tobytes() if ok2 else None,
-                       "%d / %d   %s" % (len(monde), a.vues, etat))
+                       "%d / %d vues   couverture %d / %d cases   %s"
+                       % (len(monde), a.vues, n_couv, GC * GL, etat))
     except KeyboardInterrupt:
         print("\ninterrompu")
     finally:
@@ -209,6 +233,17 @@ def principal(a) -> int:
     if len(monde) < 6:
         raise SystemExit("trop peu de vues (%d) : il en faut au moins six"
                          % len(monde))
+
+    n_couv = sum(sum(1 for c in l if c) for l in couvert)
+    print("\ncouverture de l'image : %d cases sur %d" % (n_couv, GC * GL))
+    vides = [(li, ci) for li in range(GL) for ci in range(GC)
+             if not couvert[li][ci]]
+    bords = [(li, ci) for li, ci in vides
+             if li in (0, GL - 1) or ci in (0, GC - 1)]
+    if bords:
+        print("  %d case(s) de BORD jamais visitees : la distorsion y sera"
+              % len(bords))
+        print("  extrapolee, donc douteuse. C'est au bord qu'elle est forte.")
 
     print("\nresolution du modele sur %d vues..." % len(monde))
     err, K, dist, rvecs, tvecs = cv2.calibrateCamera(monde, image, forme,
