@@ -142,6 +142,13 @@ def principal(a) -> int:
     grille[:, :2] = np.mgrid[0:COINS[0], 0:COINS[1]].T.reshape(-1, 2) * a.case
 
     monde, image, vignettes = [], [], []
+    # Immobilite exigee avant de prendre une vue. Sans elle on photographie
+    # le damier en mouvement : les coins sont etales par le flou et leur
+    # localisation sous-pixel devient fausse. C'est ce qui a donne une erreur
+    # de reprojection de 1,12 pixel et des coefficients aberrants - k1 a
+    # -1,10 quand un objectif reel tourne autour de -0,4.
+    precedents = None
+    calmes = 0
     # Couverture : ce qui compte pour la distorsion, ce n'est pas ou se
     # trouve le CENTRE du damier - il ne peut jamais approcher les bords,
     # puisque le damier entier doit rester dans le cadre - mais ou se
@@ -181,6 +188,12 @@ def principal(a) -> int:
                 # la focale de la distance. L'encombrement du damier dans
                 # l'image encode cette inclinaison : incline, il se raccourcit
                 # dans une direction et pas dans l'autre.
+                bouge = None
+                if precedents is not None and precedents.shape == coins.shape:
+                    bouge = float(np.abs(coins - precedents).mean())
+                precedents = coins.copy()
+                calmes = calmes + 1 if (bouge is not None
+                                        and bouge < a.immobile) else 0
                 p = coins.reshape(-1, 2)
                 centre = p.mean(axis=0)
                 lo, hi = p.min(axis=0), p.max(axis=0)
@@ -193,7 +206,10 @@ def principal(a) -> int:
                 if not neuf:
                     etat = ("deja vu ainsi - deplace le damier, "
                             "ou incline-le autrement")
-                elif t - dernier < 1.0:
+                elif calmes < 3:
+                    etat = ("immobilise le damier  (%s)"
+                            % ("%.2f px" % bouge if bouge is not None else "..."))
+                elif t - dernier < 0.6:
                     etat = "..."
                 else:
                     monde.append(grille.copy())
@@ -245,13 +261,66 @@ def principal(a) -> int:
               % len(bords))
         print("  extrapolee, donc douteuse. C'est au bord qu'elle est forte.")
 
-    print("\nresolution du modele sur %d vues..." % len(monde))
-    err, K, dist, rvecs, tvecs = cv2.calibrateCamera(monde, image, forme,
-                                                     None, None)
-    print("  erreur de reprojection : %.3f pixel" % err)
-    if err > 1.0:
-        print("  ATTENTION : au-dela de 1 pixel la calibration est douteuse.")
-        print("  Damier gondole, flou de bouge, ou vues trop semblables.")
+    # Choix du modele par validation croisee.
+    #
+    # L'erreur d'ajustement ne sait pas detecter un sur-ajustement : plus on
+    # ajoute de coefficients, plus elle baisse, meme quand ces coefficients
+    # n'ont plus de sens. On ajuste donc sur une moitie des vues et on mesure
+    # sur l'autre, que l'ajustement n'a jamais vue. C'est elle qui departage.
+    #
+    # Trois coefficients radiaux sur des donnees bruitees, c'est un systeme
+    # tres mal conditionne : il rend des valeurs enormes et alternees qui se
+    # compensent entre elles - k1 = -1,10, k2 = +2,13, k3 = -2,70 - et qui
+    # divergent des qu'on sort de la zone echantillonnee.
+    MODELES = [
+        ("k1 seul", cv2.CALIB_FIX_K2 | cv2.CALIB_FIX_K3
+         | cv2.CALIB_ZERO_TANGENT_DIST),
+        ("k1 k2", cv2.CALIB_FIX_K3 | cv2.CALIB_ZERO_TANGENT_DIST),
+        ("k1 k2 k3", cv2.CALIB_ZERO_TANGENT_DIST),
+        ("k1 k2 + tangentiel", cv2.CALIB_FIX_K3),
+        ("tout", 0),
+    ]
+
+    def croisee(flags):
+        """Erreur sur des vues que l'ajustement n'a jamais vues."""
+        ap, ai = monde[::2], image[::2]
+        tp, ti = monde[1::2], image[1::2]
+        if len(tp) < 3:
+            return None
+        _, K2, D2, _, _ = cv2.calibrateCamera(ap, ai, forme, None, None,
+                                              flags=flags)
+        tot, n = 0.0, 0
+        for o, pts in zip(tp, ti):
+            ok, rv, tv = cv2.solvePnP(o, pts, K2, D2)
+            if not ok:
+                return None
+            proj, _ = cv2.projectPoints(o, rv, tv, K2, D2)
+            tot += float(((proj - pts) ** 2).sum())
+            n += len(o)
+        return float((tot / n) ** 0.5)
+
+    print("\nchoix du modele : %d vues ajustees, %d gardees de cote"
+          % (len(monde[::2]), len(monde[1::2])))
+    print("  %-22s %9s %9s %9s %9s" % ("modele", "ajust.", "croisee",
+                                       "focale", "k1"))
+    resultats = []
+    for nom_m, flags in MODELES:
+        e_aj, K_aj, D_aj, _, _ = cv2.calibrateCamera(monde, image, forme,
+                                                     None, None, flags=flags)
+        e_cv = croisee(flags)
+        resultats.append((e_cv if e_cv is not None else 9e9, nom_m,
+                          e_aj, K_aj, D_aj))
+        print("  %-22s %9.3f %9s %9.1f %9.3f"
+              % (nom_m, e_aj, "%.3f" % e_cv if e_cv is not None else "-",
+                 K_aj[0, 0], D_aj.ravel()[0]))
+
+    resultats.sort(key=lambda r: r[0])
+    e_cv, nom_m, err, K, dist = resultats[0]
+    print("\n  retenu : %s  (erreur croisee %.3f px)" % (nom_m, e_cv))
+    if err > 0.8:
+        print("  ATTENTION : %.2f px d'erreur d'ajustement. Flou de bouge,"
+              % err)
+        print("  damier gondole, ou moire sur l'ecran. A refaire.")
 
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
@@ -263,6 +332,10 @@ def principal(a) -> int:
     print("  champ horizontal : %.0f degres" % champ)
     print("  distorsion : k1=%.4f k2=%.4f p1=%.5f p2=%.5f k3=%.4f"
           % tuple(dist.ravel()[:5]))
+    if abs(dist.ravel()[0]) > 0.8:
+        print("  k1 au-dela de 0,8 : tres inhabituel. La focale et la")
+        print("  distorsion se compensent sans doute. Ce sont les vues")
+        print("  INCLINEES qui les separent - incline de 30 a 40 degres.")
 
     # de combien un point du bord se deplace-t-il une fois redresse ?
     import numpy as np2
@@ -277,6 +350,7 @@ def principal(a) -> int:
     chemin = os.path.expanduser(FICHIER)
     with open(chemin, "w", encoding="utf-8") as f:
         json.dump({"K": K.tolist(), "dist": dist.ravel().tolist(),
+                   "modele": nom_m, "erreur_croisee_px": float(e_cv),
                    "largeur": forme[0], "hauteur": forme[1],
                    "erreur_px": float(err), "vues": len(monde),
                    "case_mm": a.case}, f, indent=1)
@@ -297,6 +371,8 @@ if __name__ == "__main__":
                    help="deplacement mini entre deux vues, en fraction d'image")
     p.add_argument("--forme", type=float, default=0.07,
                    help="changement mini d'encombrement, en fraction d'image")
+    p.add_argument("--immobile", type=float, default=0.30,
+                   help="deplacement maxi d'un coin entre deux images, en px")
     p.add_argument("--manuel", action="store_true",
                    help="ne pas toucher a l'exposition de la camera")
     p.add_argument("--port", type=int, default=8080)
