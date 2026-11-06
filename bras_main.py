@@ -240,6 +240,15 @@ REGLAGES = {
 
     # inclinaison de la pince toleree autour de la verticale, en degres.
     # 0 = verticale stricte, mais le volume utile n'a plus que 10 mm de haut.
+    # Pince en tout ou rien. L'ecart pouce-index rapporte a la taille de la
+    # paume derive avec l'orientation de la main - les deux grandeurs ne
+    # raccourcissent pas pareil - donc viser une ouverture precise demandait
+    # de tenir la main de face. Les seuils sont des fractions de la course
+    # calibree ; ils sont distincts pour que la pince ne batte pas autour.
+    "pince_binaire": 1.0,
+    "pince_seuil_bas": 0.30,        # en dessous : on ferme
+    "pince_seuil_haut": 0.65,       # au-dessus : on rouvre
+
     "tolerance_pince": 40.0,
 
     # Lissage. Le filtre un euro seul ne convient pas ici : il relache sa
@@ -323,7 +332,8 @@ MOLETTES = ("deprojection", "cartesien",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
             "lissage_ms", "ancre_coupure", "periode_vue_s",
-            "redressement",
+            "redressement", "pince_binaire",
+            "pince_seuil_bas", "pince_seuil_haut",
             "rattrapage", "ancre_rattrapage", "acceleration",
             "x_min", "x_max", "y_min", "y_max")
 
@@ -1460,7 +1470,46 @@ def _deprojeter(m: dict, r: dict):
     return 0.5 + (x - 0.5) * k, 0.5 + (y - 0.5) * k
 
 
-def commandes(m: dict, cal: dict, r: dict, table=None):
+class Pince:
+    """Ouvert ou ferme, avec hysteresis. Pas de position intermediaire.
+
+    L'ouverture etait proportionnelle a l'ecart pouce-index rapporte a la
+    taille de la paume. Mais les deux ne raccourcissent pas de la meme facon
+    quand la main tourne : l'ecart est porte par deux doigts, la taille par
+    toute la paume, et leur rapport derive donc avec l'orientation. Viser une
+    ouverture precise demandait de tenir la main bien de face.
+
+    En binaire, cette derive n'a plus qu'a ne pas traverser le seuil - une
+    exigence bien plus faible. Et l'hysteresis empeche de battre autour :
+    on ferme sous le seuil bas, on ne rouvre qu'au-dessus du seuil haut, les
+    deux etant distincts. Entre les deux, la pince garde son etat.
+
+    Les seuils sont des fractions de la course calibree, donc ils suivent la
+    main de chacun sans reglage absolu.
+    """
+
+    def __init__(self):
+        self.ouverte = True
+        self.bascules = 0
+
+    def __call__(self, pr, cal, r, course=40.0):
+        plage = cal["pince_ouverte"] - cal["pince_fermee"]
+        if not r["pince_binaire"] or plage <= 1e-6:
+            return _interp(pr, cal["pince_fermee"], cal["pince_ouverte"],
+                           0.0, course)
+        bas = cal["pince_fermee"] + r["pince_seuil_bas"] * plage
+        haut = cal["pince_fermee"] + r["pince_seuil_haut"] * plage
+        if self.ouverte and pr < bas:
+            self.ouverte, self.bascules = False, self.bascules + 1
+        elif not self.ouverte and pr > haut:
+            self.ouverte, self.bascules = True, self.bascules + 1
+        return course if self.ouverte else 0.0
+
+
+_PINCE = Pince()
+
+
+def commandes(m: dict, cal: dict, r: dict, table=None, pince=None):
     # les valeurs corrigees sont rangees dans m pour que le panneau camera
     # puisse les afficher a cote des brutes, et qu'on voie l'effet en direct
     mx, my = _deprojeter(m, r)
@@ -1486,12 +1535,11 @@ def commandes(m: dict, cal: dict, r: dict, table=None):
     else:
         z = _interp(my, r["y_min"], r["y_max"], bas, haut)
 
-    ouverture = _interp(m["pince"], cal["pince_fermee"],
-                        cal["pince_ouverte"], 0.0, 40.0)
+    ouverture = (pince or _PINCE)(m["pince"], cal, r)
     return base, rayon, z, ouverture, 1000.0 * dist
 
 
-def commandes_cartesien(m: dict, cal: dict, r: dict):
+def commandes_cartesien(m: dict, cal: dict, r: dict, pince=None):
     """Avance et deport lateral, au lieu d'un angle et d'un rayon.
 
     En polaire la profondeur commande le rayon : le bras s'allonge dans la
@@ -1521,8 +1569,7 @@ def commandes_cartesien(m: dict, cal: dict, r: dict):
         av = _interp(dist, cal["d_loin"], cal["d_proche"],
                      r["av_max"], r["av_min"])
 
-    ouverture = _interp(m["pince"], cal["pince_fermee"],
-                        cal["pince_ouverte"], 0.0, 40.0)
+    ouverture = (pince or _PINCE)(m["pince"], cal, r)
     return av, lat, ouverture, 1000.0 * dist
 
 
