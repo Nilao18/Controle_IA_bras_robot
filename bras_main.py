@@ -107,15 +107,17 @@ REGLAGES = {
     # rien n'ait change dans le code. On surveille donc la luminosite et on
     # refait le reglage quand elle derive.
     "cible_luminosite": 112.0,
-    "derive_luminosite": 22.0,
-    "periode_luminosite_s": 6.0,
+    "derive_luminosite": 10.0,
+    # Un pas au plus toutes les 4 s, et seulement sur une image sans
+    # main : la paume dans le champ fausse la luminosite moyenne.
+    "periode_luminosite_s": 4.0,
     # La luminosite etait mesuree sur l'image ENTIERE, main comprise : une
     # main qui approche de l'objectif eclaircit l'image, et le reglage se
     # declenchait sur elle. Cinq rattrapages en une minute, chacun vidant les
     # tampons - c'etait la latence. On ne mesure donc que les images SANS
     # main, et jamais plus d'une fois par minute.
-    "expo_sans_main": True, "expo_en_route": 0.0,
-    "expo_periode_mini_s": 60.0,
+    "expo_sans_main": True,
+    "expo_periode_mini_s": 4.0,
     # convertit la racine d'aire en metres : distance = cette constante / aire.
     # Valeur approchee, la calibration proche/loin absorbe l'echelle.
     "aire_echelle": 63.0,
@@ -364,6 +366,34 @@ ENCODEURS = ("venus", "vidc", "iris", "qcom", "codec", "decoder", "encoder")
 CAMERAS = ("arducam", "uvc", "usb", "camera", "webcam", "imx", "ov")
 
 
+def pas_exposition(main, cible, lo, hi) -> bool:
+    """UN seul pas d'exposition, sans attente ni image jetee.
+
+    Le recalage complet enchaine jusqu'a six essais, chacun avec 0,25 s
+    d'attente et dix images jetees : environ 3,5 secondes de bras fige. Le
+    desactiver n'etait pas la bonne reponse - l'exposition restait alors
+    calee sur la lumiere du demarrage, et quelques heures plus tard la
+    detection ne retrouvait plus la main qu'une image sur deux, par rafales
+    de cinq a huit. Releve le 6 novembre : luminosite tombee de 115 a 95,
+    main vue 49 % du temps au lieu de 85, trous de 555 ms.
+
+    Ici on pose un seul pas proportionnel et on rend la main. La mesure
+    suivante viendra d'elle-meme quelques secondes plus tard, sur une image
+    sans main comme toujours. La convergence prend quelques pas au lieu
+    d'etre immediate, mais ne coute aucune interruption - et une lumiere qui
+    derive lentement n'a pas besoin d'etre rattrapee vite.
+    """
+    if main.expo_courante is None or main.lum <= 2.0:
+        return False
+    facteur = _borne(cible / main.lum, 0.75, 1.35)      # un pas mesure
+    suivant = int(_borne(round(main.expo_courante * facteur), lo, hi))
+    if suivant == main.expo_courante:
+        return False
+    main.ctrl(exposure_time_absolute=suivant)
+    main.expo_courante = suivant
+    return True
+
+
 def regler_exposition(main, cible=100.0, bavard=True):
     """Amene la luminosite moyenne sur la cible par correction proportionnelle.
 
@@ -417,6 +447,9 @@ def regler_exposition(main, cible=100.0, bavard=True):
             time.sleep(0.2)
             main.vider(6)
             lum = main.luminosite(4)
+
+    # retenus pour les pas progressifs de la boucle de pilotage
+    main.expo_courante, main.expo_bornes = e, (lo, hi)
 
     if bavard:
         print("exposition %d (sur %d-%d), gain %d -> luminosite %.0f / 255"
@@ -840,6 +873,8 @@ class Main:
         self.age_image = 0.0
         self.ms_capture = 0.0
         self.ms_detection = 0.0
+        self.expo_courante = None     # temps de pose en cours, pour les pas
+        self.expo_bornes = (1, 5000)
         self.fil = None
         if filee:
             self.fil = FilCapture(self.cap)
@@ -1907,14 +1942,14 @@ def principal(args) -> int:
                     # Huit recalages ont ete releves sur une seule session.
                     # Desactive par defaut : la camera est en manuel, le
                     # reglage initial tient. --expo-en-route pour le remettre.
-                    if (r["expo_en_route"]
-                            and abs(main.lum - r["cible_luminosite"]) > r["derive_luminosite"]
+                    if (abs(main.lum - r["cible_luminosite"]) > r["derive_luminosite"]
                             and t - dernier_expo > r["expo_periode_mini_s"]):
                         dernier_expo = t
-                        print("  luminosite %.0f sans main : on refait le reglage"
-                              % main.lum)
-                        regler_exposition(main, r["cible_luminosite"], bavard=True)
-                        main.reglages_expo += 1
+                        lo, hi = main.expo_bornes
+                        if pas_exposition(main, r["cible_luminosite"], lo, hi):
+                            main.reglages_expo += 1
+                            print("  luminosite %.0f -> exposition %d"
+                                  % (main.lum, main.expo_courante))
                 if t - derniere_main > r["tolerance_perte_s"] and visu and envoyes:
                     visu.publier(envoyes, source="main perdue")
                 trou += 1
@@ -2114,9 +2149,6 @@ if __name__ == "__main__":
     p.add_argument("--deprojection", action="store_true",
                    help="demarrer avec la correction de perspective active "
                         "(reglable ensuite depuis la page)")
-    p.add_argument("--expo-en-route", action="store_true",
-                   help="autoriser le recalage d'exposition pendant la "
-                        "session (fige le bras ~3,5 s a chaque fois)")
     p.add_argument("--defauts", action="store_true",
                    help="ignorer les reglages sauvegardes et repartir des "
                         "valeurs du code")
@@ -2138,8 +2170,6 @@ if __name__ == "__main__":
         REGLAGES["cartesien"] = 1.0
     if a.fils is not None:
         REGLAGES["fils_detection"] = a.fils
-    if a.expo_en_route:
-        REGLAGES["expo_en_route"] = 1.0
     if a.defauts:
         globals()["IGNORER_MOLETTES"] = True
     raise SystemExit(principal(a))
