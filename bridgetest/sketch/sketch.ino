@@ -198,6 +198,14 @@ void loop() {
     }
     courant[i] += vitesse[i];
 
+    /* Butees appliquees APRES la rampe, avec remise a zero de la vitesse.
+     * Seule la cible etait bornee jusqu'ici : une rampe qui depasse pouvait
+     * donc sortir de la course, et l'entete annonce pourtant des butees
+     * "que le Linux ne peut pas franchir, meme sur bogue". Sans la remise a
+     * zero, l'axe resterait colle a la butee en poussant dessus. */
+    if (courant[i] < BUTEE_MIN[i]) { courant[i] = BUTEE_MIN[i]; vitesse[i] = 0.0f; }
+    if (courant[i] > BUTEE_MAX[i]) { courant[i] = BUTEE_MAX[i]; vitesse[i] = 0.0f; }
+
     const float f = (courant[i] - 0.0f) / 180.0f;
     const int us = US_MIN[i] + (int)(f * (US_MAX[i] - US_MIN[i]) + 0.5f);
     servo[i].writeMicroseconds(us);

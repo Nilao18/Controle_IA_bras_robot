@@ -1857,7 +1857,7 @@ class FilVue(threading.Thread):
         self.join(timeout=1.0)
 
 
-def _rampe(cible, courant, vitesse, dt, vmax, amax):
+def _rampe(cible, courant, vitesse, dt, vmax, amax, bornes=None):
     """Rampe trapezoidale, la meme que celle du STM32.
 
     Copie de la loi du sketch (bridgetest/sketch/sketch.ino), pour que le
@@ -1865,25 +1865,45 @@ def _rampe(cible, courant, vitesse, dt, vmax, amax):
     inertie. Sans elle, le simulateur affichait un bras passant de l'arret a
     sa vitesse de pointe en une image.
 
+    La vitesse est en degres PAR SECONDE, et non par image. Par image, elle
+    change de sens des que l'intervalle change : apres un trou de detection
+    l'intervalle triple, la vitesse memorisee devient enorme rapportee au
+    nouveau pas, et la limite d'acceleration l'empeche de redescendre assez
+    vite - l'axe part en roue libre. Mesure avant correction : jusqu'a 160
+    degres de depassement des butees quand des trous surviennent, contre 4
+    en marche reguliere. Le bras se repliait alors a travers le boitier.
+
+    Les butees sont appliquees en dernier, avec remise a zero de la vitesse
+    de l'axe concerne : sans elle, l'axe resterait colle a la butee en
+    poussant dessus.
+
     La vitesse est bornee deux fois : par le plafond de l'axe, et par ce qui
     permet encore de s'arreter sur la cible. La forme continue sqrt(2.a.d)
     depasse en pas discret - 1,2 degre sur un mouvement d'epaule de 90 - d'ou
     les termes en a/2, qui corrigent le demi-pas parcouru pendant la periode.
     """
     sortie, v_sortie = [], []
-    for c, x, v, vm, am in zip(cible, courant, vitesse, vmax, amax):
-        vm, am = vm * dt, am * dt * dt
+    for i, (c, x, v, vm, am) in enumerate(zip(cible, courant, vitesse,
+                                              vmax, amax)):
         e = c - x
-        vise = _borne(e, -vm, vm)
+        vise = _borne(e / dt, -vm, vm)          # vitesse pour tout rattraper
         if am > 0.0:
-            frein = math.sqrt(2.0 * am * abs(e) + 0.25 * am * am) - 0.5 * am
+            dv = am * dt                        # variation possible en un pas
+            frein = math.sqrt(2.0 * am * abs(e) + 0.25 * dv * dv) - 0.5 * dv
             vise = _borne(vise, -frein, frein)
-            v = v + _borne(vise - v, -am, am)
-            if v * e > 0.0 and abs(v) > abs(e):
-                v = e
+            v = v + _borne(vise - v, -dv, dv)
+            if v * e > 0.0 and abs(v * dt) > abs(e):
+                v = e / dt                      # ne jamais franchir la cible
         else:
             v = vise
-        sortie.append(x + v)
+        x += v * dt
+        if bornes is not None:                  # butees materielles
+            lo, hi = bornes[i]
+            if x < lo:
+                x, v = lo, 0.0
+            elif x > hi:
+                x, v = hi, 0.0
+        sortie.append(x)
         v_sortie.append(v)
     return sortie, v_sortie
 
@@ -2187,6 +2207,7 @@ def principal(args) -> int:
             garder_molettes(molettes)
 
     envoyes = None
+    bornes_axes = [(ax["min"], ax["max"]) for ax in b.axes[:5]]
     veille = Veille()       # mise en veille par geste
     vitesses = [0.0] * 5    # etat de la rampe, en degres par seconde
     sortie = None           # derniere pose publiee
@@ -2281,7 +2302,7 @@ def principal(args) -> int:
                     amax = (list(r["accelerations_deg_s2"]) if r["acceleration"]
                             else [0.0] * len(vmax))
                     envoyes, vitesses = _rampe(vise, envoyes, vitesses, dt_cmd,
-                                               vmax, amax)
+                                               vmax, amax, bornes_axes)
                 sortie = list(envoyes)
                 recents = []
                 if visu:
@@ -2349,7 +2370,7 @@ def principal(args) -> int:
                 amax = (list(r["accelerations_deg_s2"]) if r["acceleration"]
                         else [0.0] * len(vmax))
                 envoyes, vitesses = _rampe(vise, envoyes, vitesses, dt_cmd,
-                                           vmax, amax)
+                                           vmax, amax, bornes_axes)
             # Moyenne glissante sur un NOMBRE d'images, ce nombre etant
             # deduit de la cadence pour que le retard reste le meme quand
             # elle change.
