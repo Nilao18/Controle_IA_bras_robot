@@ -90,6 +90,12 @@ REGLAGES = {
     # millimetres affiches sont desormais rapportes a elle.
     "ref_distance_m": 0.45,
 
+    # Redressement de la distorsion de l'objectif, si ~/bras_objectif.json
+    # existe. Mesure au damier : un point du bord se deplace de 54 pixels,
+    # et comme c'est la taille apparente de la paume qui donne la distance,
+    # une main qui s'ecarte du centre paraissait reculer de 30 %.
+    "redressement": 1.0,
+
     # correction de perspective : 0 = desactivee (comportement d'origine),
     # 1 = active. Reglable en direct depuis la page, pour comparer les deux
     # sur le meme lancement plutot que de memoire d'une session a l'autre.
@@ -135,7 +141,11 @@ REGLAGES = {
     # bas demande d'amener la main au bord, et une marge de 3 % rejetait alors
     # des centaines d'images d'affilee - la profondeur restait figee sur sa
     # derniere valeur, ce qui donnait un bras bloque puis sautant.
-    "marge_cadre": 0.0,
+    # Un repere redresse peut tomber hors de l'image - un point du bord
+    # gauche se deplace de 54 px vers l'exterieur - et c'est voulu. La marge
+    # doit donc laisser passer ce debordement, sans quoi toute main proche
+    # d'un bord serait rejetee.
+    "marge_cadre": 0.12,
     # course de profondeur minimale acceptee a la calibration. En dessous, le
     # gain devient tel que le bruit sature les butees de rayon : c'est ce qui
     # rendait le bras inutilisable quand la calibration ratait.
@@ -313,6 +323,7 @@ MOLETTES = ("deprojection", "cartesien",
             "zone_morte_deg", "vitesse_max_deg_s", "base_amplitude",
             "r_min", "r_max", "av_min", "av_max", "lat_amplitude",
             "lissage_ms", "ancre_coupure", "periode_vue_s",
+            "redressement",
             "rattrapage", "ancre_rattrapage", "acceleration",
             "x_min", "x_max", "y_min", "y_max")
 
@@ -693,6 +704,68 @@ def _inclinaison(monde):
     return abs(float(n[2])) / nn if nn > 1e-9 else None
 
 
+class _Repere:
+    """Un repere de main redresse. Memes champs que celui de MediaPipe."""
+    __slots__ = ("x", "y", "z")
+
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+
+
+def charger_objectif(chemin="~/bras_objectif.json"):
+    """Modele de l'objectif mesure au damier, ou None."""
+    chemin = os.path.expanduser(chemin)
+    if not os.path.exists(chemin):
+        return None
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            d = json.load(f)
+        import numpy as np
+        return {"K": np.array(d["K"], dtype=float),
+                "dist": np.array(d["dist"], dtype=float).reshape(1, -1),
+                "largeur": int(d["largeur"]), "hauteur": int(d["hauteur"]),
+                "erreur": float(d.get("erreur_croisee_px", d.get("erreur_px", 0))),
+                "modele": d.get("modele", "?")}
+    except Exception as e:
+        print("objectif : %s illisible (%s)" % (chemin, e))
+        return None
+
+
+def redresser(lm, w, h, obj, flip, cv2, np):
+    """Annule la distorsion de l'objectif sur les reperes de la main.
+
+    Mesure au damier : l'objectif comprime la peripherie, et un point du
+    bord gauche se redresse de 54 pixels. Comme c'est la TAILLE apparente de
+    la paume qui sert a estimer la distance, une main qui s'ecarte du centre
+    paraissait reculer : 640 / 500 / 650 mm releves du bord gauche au bord
+    droit a distance constante, soit 30 % de faux recul.
+
+    Les reperes arrivent dans le repere de l'image RETOURNEE, alors que le
+    modele a ete mesure sur l'image brute. On defait donc le retournement,
+    on redresse, et on le refait. L'oublier reviendrait a appliquer la
+    correction a l'envers, ce qui doublerait l'erreur au lieu de l'annuler.
+
+    Vingt et un points : quelques microsecondes.
+    """
+    pts = np.empty((len(lm), 1, 2), dtype=np.float32)
+    for i, p in enumerate(lm):
+        x, y = p.x * w, p.y * h
+        if flip in (1, -1):
+            x = w - x
+        if flip in (0, -1):
+            y = h - y
+        pts[i, 0, 0], pts[i, 0, 1] = x, y
+    droits = cv2.undistortPoints(pts, obj["K"], obj["dist"], P=obj["K"])
+    sortie = []
+    for i, (x, y) in enumerate(droits.reshape(-1, 2)):
+        if flip in (1, -1):
+            x = w - x
+        if flip in (0, -1):
+            y = h - y
+        sortie.append(_Repere(float(x) / w, float(y) / h, lm[i].z))
+    return sortie
+
+
 def charger_molettes(r: dict) -> str:
     """Reprend les reglages du dernier lancement. Jamais bloquant."""
     if IGNORER_MOLETTES:
@@ -881,6 +954,7 @@ class Main:
         self.ms_detection = 0.0
         self.expo_courante = None     # temps de pose en cours, pour les pas
         self.expo_bornes = (1, 5000)
+        self.objectif = charger_objectif()
         self.fil = None
         if filee:
             self.fil = FilCapture(self.cap)
@@ -987,8 +1061,11 @@ class Main:
             self.reperes = None
             return None
         lm = res.multi_hand_landmarks[0].landmark
-        self.reperes = lm
+        self.reperes = lm               # bruts : c'est eux qu'on dessine
         h, w = image.shape[:2]
+        if self.objectif is not None and REGLAGES["redressement"]:
+            import numpy as _np
+            lm = redresser(lm, w, h, self.objectif, self.flip, self.cv2, _np)
         # quatre travees poignet -> bases des doigts plutot qu'une seule :
         # le bruit de detection se moyenne, et aucune ne s'effondre quand le
         # poing se ferme (contrairement a la largeur de paume 5-17)
@@ -1890,6 +1967,12 @@ def principal(args) -> int:
         return Lisseur(seuil, r["ancre_rattrapage"],
                        r["ancre_coupure"], r["ancre_beta"])
 
+    if main.objectif is not None:
+        print("objectif : modele %s, erreur %.2f px, redressement %s"
+              % (main.objectif["modele"], main.objectif["erreur"],
+                 "actif" if r["redressement"] else "inactif"))
+    else:
+        print("objectif : non calibre (lance calibrer_objectif.py)")
     print(charger_molettes(r))
 
     f_base = lisseur(r["ancre_base_deg"])
