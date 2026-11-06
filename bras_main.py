@@ -1791,7 +1791,7 @@ class FilVue(threading.Thread):
     retour camera qui saute une image qu'une commande de bras qui retarde.
     """
 
-    def __init__(self, visu, main):
+    def __init__(self, visu, main, verifier=None):
         super().__init__(daemon=True)
         self.visu, self.main = visu, main
         self.verrou = threading.Lock()
@@ -1799,12 +1799,27 @@ class FilVue(threading.Thread):
         self.arret = False
         self.abandons = 0
         self.ms = 0.0
+        # Surveillance des collisions sur la pose REELLEMENT envoyee.
+        #
+        # Le resolveur verifie la pose cible, et un balayage de 210 trajets
+        # tires au hasard plus 60 replis n'a trouve aucune collision sur le
+        # chemin. Pourtant une interpenetration a ete vue a l'ecran. Plutot
+        # que de continuer a supposer, on controle ce qui part vraiment.
+        #
+        # Le controle coute une dizaine de millisecondes : beaucoup trop pour
+        # la boucle de pilotage, rien du tout ici, ou il est deja paye par
+        # l'encodage. On n'echantillonne qu'une pose sur deux ou trois, ce
+        # qui suffit largement pour attraper une faute qui dure une seconde.
+        self.verifier = verifier
+        self.heurts = 0
+        self.dernier_heurt = None
 
-    def poser(self, image, reperes, mesures, fichier=None):
+    def poser(self, image, reperes, mesures, fichier=None, pose=None,
+              ouverture=0.0):
         with self.verrou:
             if self.travail is not None:
                 self.abandons += 1
-            self.travail = (image, reperes, mesures, fichier)
+            self.travail = (image, reperes, mesures, fichier, pose, ouverture)
 
     def run(self):
         while not self.arret:
@@ -1814,7 +1829,19 @@ class FilVue(threading.Thread):
                 time.sleep(0.004)
                 continue
             t0 = time.time()
-            img, reperes, mesures, fichier = travail
+            img, reperes, mesures, fichier, pose, ouv = travail
+            if self.verifier is not None and pose is not None:
+                try:
+                    h = self.verifier(list(pose), ouv)
+                    if h:
+                        self.heurts += 1
+                        self.dernier_heurt = h
+                        print("  COLLISION sur la pose envoyee : %s" % h)
+                        print("     servos %s  pince %.0f mm"
+                              % (" ".join("%.1f" % v for v in pose), ouv))
+                except Exception as e:
+                    print("  controle de collision : %s" % e)
+                    self.verifier = None
             try:
                 jpeg, dessin = _dessiner(self.main, img, reperes)
                 if jpeg is not None:
@@ -2121,7 +2148,7 @@ def principal(args) -> int:
     # Les molettes de la page ne s'affichaient pas : elle les construit a
     # partir des valeurs publiees par /etat, et personne ne les publiait. On
     # les pose donc au demarrage, puis on relit ce que la page a deplace.
-    fil_vue = FilVue(visu, main) if visu else None
+    fil_vue = FilVue(visu, main, filtre) if visu else None
     if fil_vue is not None:
         fil_vue.start()
 
@@ -2367,7 +2394,7 @@ def principal(args) -> int:
                                     "cos": round(main.cos_t or 0, 2),
                                     "images_s": round(n / max(t - t0, 1e-3), 1),
                                     "main_pct": round(100 * n_main / max(n, 1))},
-                              fichier)
+                              fichier, sortie, co)
             if visu:
                 visu.publier(sortie, ouverture=co,
                              source=(f"main  R {cr:.0f}  Z {cz:.0f}  "
@@ -2413,7 +2440,10 @@ def principal(args) -> int:
                          "sans_main": 0, "ik": 0}
                 if fil_vue is not None:
                     print(f"       vue {fil_vue.ms:5.1f} ms hors boucle"
-                          f"   vues abandonnees {fil_vue.abandons}")
+                          f"   vues abandonnees {fil_vue.abandons}"
+                          + (f"   COLLISIONS {fil_vue.heurts}"
+                             f" ({fil_vue.dernier_heurt})"
+                             if fil_vue.heurts else ""))
                 ki = max(cum["nik"], 1)
                 print(f"       dont  commandes {1000*cum['cmd']/ki:5.1f}"
                       f"  + cinematique {1000*cum['ik']/ki:5.1f}"
