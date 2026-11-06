@@ -21,9 +21,18 @@ des angles et des positions varies, puis resout le modele de l'objectif
 dans ~/bras_objectif.json. bras_main le lit s'il existe et redresse les 21
 points de la main a chaque image - quelques microsecondes.
 
-Le damier : damier_calibration.pdf, 9 x 6 coins interieurs, cases de 20 mm.
-Imprimer a 100 %, verifier le reglet, et COLLER SUR UN SUPPORT RIGIDE. Un
-damier tenu a la main gondole, et toute la mesure part avec lui.
+Deux damiers, 9 x 6 coins interieurs tous les deux :
+
+  damier_calibration.pdf  a imprimer a 100 %, reglet de controle inclus, a
+                          COLLER SUR UN SUPPORT RIGIDE - un damier tenu a la
+                          main gondole et toute la mesure part avec lui.
+  damier_ecran.png        a afficher plein ecran. Un ecran est plus plat que
+                          n'importe quel carton. Mesurer alors une case au
+                          reglet SUR L'ECRAN et la passer en --case, puisque
+                          sa taille depend de la definition d'affichage.
+                          Tourner la camera plutot que le damier : pour
+                          mesurer l'objectif, seule la position relative
+                          compte.
 
     python3 calibrer_objectif.py
     python3 calibrer_objectif.py --vues 20 --port 8080
@@ -118,6 +127,15 @@ def principal(a) -> int:
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, a.hauteur)
     if not cap.isOpened():
         raise SystemExit("camera /dev/video%d inaccessible" % a.device)
+
+    # Exposition automatique le temps de la calibration. bras_main laisse la
+    # camera en manuel, calee sur une scene ou la main occupe le cadre ; un
+    # damier, a fortiori affiche sur un ecran, n'a rien a voir avec ca.
+    # Ici le flou de bouge et la saturation comptent plus que la stabilite.
+    if not a.manuel:
+        os.system("v4l2-ctl -d /dev/video%d --set-ctrl=auto_exposure=3"
+                  " >/dev/null 2>&1" % a.device)
+        time.sleep(0.8)
 
     # grille des coins dans le repere du damier, en millimetres
     grille = np.zeros((COINS[0] * COINS[1], 3), np.float32)
@@ -227,5 +245,7 @@ if __name__ == "__main__":
                    help="cote d'une case en mm, mesure sur l'impression")
     p.add_argument("--ecart", type=float, default=60.0,
                    help="distance mini entre deux vues, en pixels")
+    p.add_argument("--manuel", action="store_true",
+                   help="ne pas toucher a l'exposition de la camera")
     p.add_argument("--port", type=int, default=8080)
     sys.exit(principal(p.parse_args()))
