@@ -142,8 +142,14 @@ REGLAGES = {
     "course_mini_m": 0.15,
     # temps de placement avant chaque mesure de calibration. Trois secondes
     # ne suffisaient pas pour se mettre en position.
-    "calibration_placement_s": 6.0,
-    "calibration_mesure_s": 3.0,
+    # La calibration n'attend plus une duree fixe : elle enchaine des que la
+    # main est posee et immobile. `placement` n'est plus qu'un filet de
+    # securite, `mini` le temps laisse pour lire la consigne et changer de
+    # pose, `stable` la duree d'immobilite exigee.
+    "calibration_placement_s": 8.0,
+    "calibration_mini_s": 1.2,
+    "calibration_stable_s": 0.5,
+    "calibration_mesure_s": 1.5,
 
     # garde-fou anti-saut : vitesse maximale credible d'une main. A 7 images par
     # seconde cela autorise 214 mm d'une image a l'autre, soit tous les gestes
@@ -1049,7 +1055,8 @@ class Main:
 
 # ------------------------------------------------------------ calibration
 
-def _publier_calibration(visu, main, consigne, reste=None) -> None:
+def _publier_calibration(visu, main, consigne, reste=None,
+                         attendu=None) -> None:
     """Retour camera pendant la calibration.
 
     Jusqu'ici la calibration se faisait a l'aveugle : le panneau camera
@@ -1069,6 +1076,8 @@ def _publier_calibration(visu, main, consigne, reste=None) -> None:
         d["reste"] = "%.0f s" % reste
     if main.travee_a:
         d["travee px"] = "%.0f" % main.travee_a
+    if attendu:
+        d["attendu"] = attendu
     visu.publier_image(jpeg, d)
 
 
@@ -1151,31 +1160,81 @@ def calibrer(main: Main, visu=None) -> dict:
     puis les deux bouts de la course en profondeur.
     """
     attente = REGLAGES["calibration_placement_s"]
+    mini = REGLAGES["calibration_mini_s"]
+    stable = REGLAGES["calibration_stable_s"]
     duree = REGLAGES["calibration_mesure_s"]
     print("\ncalibration, quatre temps")
-    print("%.0f s pour te placer, puis %.0f s de mesure a chaque fois.\n"
-          % (attente, duree))
+    print("place-toi, la mesure part des que ta main est immobile.\n")
 
     courante = [""]                     # consigne en cours, pour le panneau
 
     def etape(n, consigne, detail):
+        """Attend que la main soit posee ET immobile, puis enchaine.
+
+        Avant : six secondes fixes a chaque pose, parce qu'il n'y avait aucun
+        moyen de savoir si la personne etait prete - quatre poses, trente-six
+        secondes, l'essentiel passe a attendre pour rien. On observe
+        maintenant directement ce qu'on attendait : la travee de la paume, la
+        position de la main et l'ecart de pince cessent de varier.
+
+        Le delai minimal laisse le temps de lire la consigne et de CHANGER de
+        pose : sans lui, la pose precedente etant deja stable, l'etape
+        suivante se declencherait avant qu'on ait bouge.
+        """
         courante[0] = "%d/4  %s" % (n, consigne)
         print(" %s" % courante[0])
         print("      %s" % detail)
-        if visu is not None:
-            print("      (retour camera dans le simulateur)")
-        reste = attente
-        prochaine = 0.0
-        while reste > 0.05:
-            main.lire()                 # on garde la detection vivante
-            if time.time() > prochaine:
-                prochaine = time.time() + 0.25
-                _publier_calibration(visu, main, courante[0], reste)
-            if abs(reste - round(reste)) < 0.03 and round(reste) > 0:
-                print("   %d..." % round(reste), flush=True)
-            time.sleep(0.1)
-            reste -= 0.1
-        print("   -- mesure --", flush=True)
+        debut, fin = time.time(), time.time() + attente
+        fenetre, prochaine, prete = [], 0.0, False
+        while time.time() < fin:
+            m = main.lire()
+            t = time.time()
+            if t > prochaine:
+                prochaine = t + 0.2
+                _publier_calibration(visu, main, courante[0], fin - t,
+                                     "immobilise la main" if not prete else None)
+            if m is None or not main.travee_a:
+                fenetre = []                     # main perdue : on repart
+                time.sleep(0.01)
+                continue
+            fenetre.append((t, main.travee_a, m["x"], m["y"], m["pince"]))
+            fenetre = [e for e in fenetre if t - e[0] <= stable]
+            if t - debut < mini or len(fenetre) < 5 or t - fenetre[0][0] < stable:
+                time.sleep(0.01)
+                continue
+            # On compare les deux moities de la fenetre plutot que son
+            # etendue. L'etendue confond le bruit et une derive lente : une
+            # main qui recule encore de 12 % par seconde passait pour
+            # immobile, et la pose 4 se mesurait avant d'etre atteinte. La
+            # difference des moyennes, elle, annule le bruit et ne voit que
+            # le deplacement reel.
+            col = list(zip(*fenetre))
+            moitie = len(fenetre) // 2
+
+            def derive(c, relatif):
+                a1 = sum(c[:moitie]) / moitie
+                a2 = sum(c[moitie:]) / (len(c) - moitie)
+                return abs(a2 - a1) / (max(abs((a1 + a2) / 2), 1e-6)
+                                       if relatif else 1.0)
+
+            # La difference des moyennes s'annule sur une oscillation : une
+            # main qui tremble regulierement passerait pour immobile. On y
+            # ajoute donc une borne d'etendue, assez large pour laisser
+            # passer le bruit de detection (~4 %) et assez serree pour
+            # rejeter un tremblement (~10 %).
+            etendue = max((max(c) - min(c)) / max(abs(sum(c) / len(c)), 1e-6)
+                          for c in (col[1], col[4]))
+            if (max(derive(col[1], True), derive(col[4], True)) < 0.02
+                    and max(derive(col[2], False), derive(col[3], False)) < 0.006
+                    and etendue < 0.08):
+                prete = True
+                break
+            time.sleep(0.01)
+        if prete:
+            print("   main stable apres %.1f s -- mesure --" % (time.time() - debut),
+                  flush=True)
+        else:
+            print("   main instable, on mesure quand meme -- mesure --", flush=True)
 
     etape(1, "POSE DE TRAVAIL : main OUVERTE, paume vers la camera",
           "doigts bien ecartes, a la distance ou tu piloteras le plus souvent")
