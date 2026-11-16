@@ -1814,6 +1814,30 @@ class FilVue(threading.Thread):
         self.heurts = 0
         self.dernier_heurt = None
         self.journal = os.path.expanduser("~/bras_collisions.log")
+        self.boite = None
+
+    def _passe(self, ouv):
+        """Les dernieres images, avec la hauteur de la pince a chaque etage."""
+        images = self.boite.instantane()
+        if not images:
+            return ""
+        bras = getattr(self.boite, "bras", None)
+        lignes = ["     dt     z cible  z zone morte  z rampe  z sortie"
+                  "   heurt\n"]
+        for t, dt, cible, vise, envoyes, sortie in images[-16:]:
+            z = []
+            for p in (cible, vise, envoyes, sortie):
+                try:
+                    z.append("%8.1f" % bras.fk(p)["z"])
+                except Exception:
+                    z.append("       -")
+            try:
+                h = self.verifier(list(sortie), ouv) or ""
+            except Exception:
+                h = ""
+            lignes.append("   %5.0f ms %s %s %s %s   %s\n"
+                          % (dt * 1000.0, z[0], z[1], z[2], z[3], h))
+        return "".join(lignes)
 
     def poser(self, image, reperes, mesures, fichier=None, pose=None,
               ouverture=0.0, cible=None):
@@ -1851,6 +1875,8 @@ class FilVue(threading.Thread):
                                     " ".join("%.1f" % v for v in cible)
                                     if cible is not None else "-",
                                     hc or "saine"))
+                        if self.boite is not None:
+                            ligne += self._passe(ouv)
                         print("  COLLISION : %s\n%s" % (h, ligne), end="")
                         try:
                             with open(self.journal, "a", encoding="utf-8") as f:
@@ -1873,6 +1899,31 @@ class FilVue(threading.Thread):
     def fermer(self):
         self.arret = True
         self.join(timeout=1.0)
+
+
+class Boite:
+    """Enregistreur de vol : les dernieres images, vidées sur incident.
+
+    Cinq hypotheses ont echoue sur les collisions `mors_a / table` parce
+    que le journal ne gardait que la pose fautive, sans son passe. Or la
+    faute se construit : la consigne traverse la zone morte, la rampe
+    puis la moyenne glissante, et chacun de ces etages retarde un axe
+    autrement. On garde donc les quatre poses de chaque image, et on les
+    ecrit quand le controle se plaint - l'etage qui creuse se lit alors
+    directement dans la colonne des hauteurs.
+    """
+
+    def __init__(self, profondeur: int = 24):
+        self.profondeur = profondeur
+        self.images = []
+
+    def noter(self, t, dt, vise, envoyes, sortie, cible):
+        self.images.append((t, dt, list(cible), list(vise),
+                            list(envoyes), list(sortie)))
+        del self.images[:-self.profondeur]
+
+    def instantane(self):
+        return list(self.images)
 
 
 def _rampe(cible, courant, vitesse, dt, vmax, amax, bornes=None):
@@ -2186,8 +2237,11 @@ def principal(args) -> int:
     # Les molettes de la page ne s'affichaient pas : elle les construit a
     # partir des valeurs publiees par /etat, et personne ne les publiait. On
     # les pose donc au demarrage, puis on relit ce que la page a deplace.
+    boite = Boite()         # enregistreur de vol, vide sur collision
+    boite.bras = b
     fil_vue = FilVue(visu, main, filtre) if visu else None
     if fil_vue is not None:
+        fil_vue.boite = boite
         fil_vue.start()
 
     molettes = {k: float(r[k]) for k in MOLETTES}
@@ -2413,6 +2467,7 @@ def principal(args) -> int:
             del recents[:-int(n_moy)]
             sortie = [sum(p[i] for p in recents) / len(recents)
                       for i in range(len(envoyes))]
+            boite.noter(t, dt_cmd, vise, envoyes, sortie, sol.servos)
 
             if fil_vue is not None and t > prochaine_vue:
                 prochaine_vue = t + r["periode_vue_s"]
