@@ -265,6 +265,60 @@ class Collisions:
                 return f"{self.pieces[k]['nom']} / boitier"
         return None
 
+    def verifier_sol_angles(self, angles: Sequence[float],
+                            ouverture: float = 0.0) -> Optional[str]:
+        """Comme verifier_angles, mais contre le plateau et le boitier seuls.
+
+        Pourquoi ce raccourci existe. La boucle de pilotage doit controler la
+        pose qu'elle envoie, parce que trois etages de lissage passent apres
+        la cinematique et deplacent la pose de quelques millimetres. Mais le
+        controle complet coute une dizaine de millisecondes sur la carte, par
+        image, pour un tour de 62 : trop.
+
+        Or il n'a pas a etre complet. Mesure sur 1848 poses validees,
+        perturbees de +/- 6 degres - le plus grand ecart releve dans le
+        journal : les seuls heurts que le lissage puisse faire apparaitre
+        sont contre le plateau, et aucun au-dessus de 45 mm de hauteur de
+        pince. Le bras ne peut pas se replier sur lui-meme pour quelques
+        degres d'ecart ; il peut traverser le plateau, qui n'est qu'a un
+        millimetre sous la consigne.
+
+        On garde donc la boucle sur les pieces mobiles - celle qui compte les
+        points passes sous le plateau ou dans l'emprise du boitier - et on
+        laisse tomber la boucle sur les paires de pieces, qui fait le gros du
+        travail. Les deux verdicts sont identiques des que la pose vient d'une
+        cible validee.
+        """
+        T = self._reperes(angles, ouverture)
+        x0, x1, y0, y1, zb = self.boitier
+        boite_boitier = ((x0, y0, -1e6), (x1, y1, zb))
+        for k in MOBILES:
+            R, t = T[k]
+            lo, hi = _boite_monde(self.pieces[k]["coins_pts"], R, t)
+            if lo[2] >= 0.0 and not _chevauche((lo, hi), boite_boitier):
+                continue
+            P = self._monde(k, T)
+            if _np is not None:
+                sous = (P[:, 2] < 0).sum()
+                dans = ((P[:, 0] > x0) & (P[:, 0] < x1) & (P[:, 1] > y0) &
+                        (P[:, 1] < y1) & (P[:, 2] < zb)).sum()
+            else:
+                sous = sum(1 for p in P if p[2] < 0)
+                dans = sum(1 for p in P
+                           if x0 < p[0] < x1 and y0 < p[1] < y1 and p[2] < zb)
+            if sous >= MIN_POINTS:
+                return f"{self.pieces[k]['nom']} / table"
+            if dans >= MIN_POINTS:
+                return f"{self.pieces[k]['nom']} / boitier"
+        return None
+
+    def verifier_sol(self, servos: Sequence[float],
+                     ouverture: float = 0.0) -> Optional[str]:
+        """Angles servo. Plateau et boitier seuls - voir verifier_sol_angles."""
+        angles = [self.axes[i]["sens"] * (s - self.axes[i]["ref"])
+                  for i, s in enumerate(servos[:5])]
+        return self.verifier_sol_angles(angles, ouverture)
+
     def verifier(self, servos: Sequence[float], ouverture: float = 0.0) -> Optional[str]:
         """Angles servo. Rend None si la pose est saine, sinon le contact."""
         angles = [self.axes[i]["sens"] * (s - self.axes[i]["ref"])

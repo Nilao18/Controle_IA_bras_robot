@@ -168,6 +168,7 @@ REGLAGES = {
     # Plancher de bruit de la porte de vitesse, en mm. S'ajoute au terme de
     # vitesse pour que le seuil ne se resserre pas quand la cadence monte.
     "saut_bruit_mm": 40.0,
+
     "saut_v_max": 1.5,
     "saut_suite_max": 2,
 
@@ -2152,10 +2153,16 @@ def principal(args) -> int:
     from bras_ik import Bras
     try:
         from bras_collision import Collisions
-        filtre = Collisions().verifier
+        collisions = Collisions()
+        filtre = collisions.verifier
+        # La boucle controle la pose qu'elle envoie avec un controle
+        # restreint au plateau et au boitier : c'est tout ce que le lissage
+        # peut faire apparaitre, et il coute onze fois moins. Deux objets
+        # distincts, pour que son cache ne defasse pas celui du resolveur.
+        filtre_sol = Collisions().verifier_sol
     except Exception as e:
         print(f"bras_collision indisponible ({e}) : trajectoires non verifiees")
-        filtre = None
+        filtre = filtre_sol = None
 
     b = Bras()
     resoudre = Resolveur(b, filtre, r["tolerance_pince"])
@@ -2470,13 +2477,13 @@ def principal(args) -> int:
             # relevé : d'un bond le plus grand saut vaut 11,5 degres, en
             # quatre pas il tombe a 4,7 pour 3,3 controles - et ces controles
             # ne s'executent que sur les images fautives, rares.
-            if filtre is not None and filtre(sortie, co) is not None:
+            if filtre_sol is not None and filtre_sol(sortie, co) is not None:
                 rattrapes += 1
                 trouve = None
                 for k in range(1, 3):
                     f = k / 2.0
                     p = [a + f * (z - a) for a, z in zip(sortie, sol.servos)]
-                    if filtre(p, co) is None:
+                    if filtre_sol(p, co) is None:
                         trouve = p
                         break
                 if trouve is not None:
@@ -2486,7 +2493,7 @@ def principal(args) -> int:
                     # presente, on le journalise plutot que de le deviner
                     # plus tard.
                     sortie = list(sure) if sure is not None else list(sol.servos)
-                    boite.ecrire(filtre, co)
+                    boite.ecrire(filtre_sol, co)
                 sure = list(sortie)
             else:
                 sure = list(sortie)
