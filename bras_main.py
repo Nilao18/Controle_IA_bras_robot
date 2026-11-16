@@ -2283,6 +2283,8 @@ def principal(args) -> int:
     veille = Veille()       # mise en veille par geste
     vitesses = [0.0] * 5    # etat de la rampe, en degres par seconde
     sortie = None           # derniere pose publiee
+    sure = None             # derniere pose publiee sans collision
+    rattrapes = 0           # poses corrigees juste avant l'envoi
     recents = []            # images moyennees par le lissage
     dt_lisse = 0.10         # intervalle entre images, lisse
     derniere_main = 0.0
@@ -2467,6 +2469,45 @@ def principal(args) -> int:
             del recents[:-int(n_moy)]
             sortie = [sum(p[i] for p in recents) / len(recents)
                       for i in range(len(envoyes))]
+            # Dernier mot au controle de collision, sur la pose REELLEMENT
+            # envoyee. La cinematique ne validait que sa propre solution, et
+            # trois etages de lissage passaient apres elle : zone morte,
+            # rampe, moyenne glissante. Chacun deplace la pose de l'ordre de
+            # son reglage - un demi-degre de seuil vaut deux a trois
+            # millimetres de hauteur - alors qu'au ras du plateau il ne
+            # reste qu'un millimetre de marge. D'ou des heurts `mors_a /
+            # table` dont la cible etait saine dans les neuf cas du relevé.
+            #
+            # Aucun arrangement dans l'espace des angles ne corrige cela,
+            # puisque le lissage travaille en aval du controle. On controle
+            # donc ce qu'on envoie, et on retombe sur la cible - fraiche et
+            # deja validee - quand le lissage l'a fait plonger. L'etat
+            # interne, lui, n'est pas touche : la continuite du lissage est
+            # preservee et la correction ne s'auto-entretient pas.
+            # On ne saute pas d'emblee sur la cible : on cherche le point
+            # sur, le plus proche possible de la pose lissee, en remontant le
+            # segment qui mene a la cible. Mesure sur les onze heurts du
+            # relevé : d'un bond le plus grand saut vaut 11,5 degres, en
+            # quatre pas il tombe a 4,7 pour 3,3 controles - et ces controles
+            # ne s'executent que sur les images fautives, rares.
+            if filtre is not None and filtre(sortie, co) is not None:
+                rattrapes += 1
+                trouve = None
+                for k in range(1, 5):
+                    f = k / 4.0
+                    p = [a + f * (z - a) for a, z in zip(sortie, sol.servos)]
+                    if filtre(p, co) is None:
+                        trouve = p
+                        break
+                if trouve is not None:
+                    sortie = trouve
+                elif sure is not None:
+                    sortie = list(sure)
+                else:
+                    sortie = list(sol.servos)
+                sure = list(sortie)
+            else:
+                sure = list(sortie)
             boite.noter(t, dt_cmd, vise, envoyes, sortie, sol.servos)
 
             if fil_vue is not None and t > prochaine_vue:
@@ -2535,6 +2576,7 @@ def principal(args) -> int:
                 if fil_vue is not None:
                     print(f"       vue {fil_vue.ms:5.1f} ms hors boucle"
                           f"   vues abandonnees {fil_vue.abandons}"
+                          + (f"   rattrapes {rattrapes}" if rattrapes else "")
                           + (f"   COLLISIONS {fil_vue.heurts}"
                              f" ({fil_vue.dernier_heurt})"
                              if fil_vue.heurts else ""))
