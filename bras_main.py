@@ -1811,33 +1811,6 @@ class FilVue(threading.Thread):
         # l'encodage. On n'echantillonne qu'une pose sur deux ou trois, ce
         # qui suffit largement pour attraper une faute qui dure une seconde.
         self.verifier = verifier
-        self.heurts = 0
-        self.dernier_heurt = None
-        self.journal = os.path.expanduser("~/bras_collisions.log")
-        self.boite = None
-
-    def _passe(self, ouv):
-        """Les dernieres images, avec la hauteur de la pince a chaque etage."""
-        images = self.boite.instantane()
-        if not images:
-            return ""
-        bras = getattr(self.boite, "bras", None)
-        lignes = ["     dt     z cible  z zone morte  z rampe  z sortie"
-                  "   heurt\n"]
-        for t, dt, cible, vise, envoyes, sortie in images[-16:]:
-            z = []
-            for p in (cible, vise, envoyes, sortie):
-                try:
-                    z.append("%8.1f" % bras.fk(p)["z"])
-                except Exception:
-                    z.append("       -")
-            try:
-                h = self.verifier(list(sortie), ouv) or ""
-            except Exception:
-                h = ""
-            lignes.append("   %5.0f ms %s %s %s %s   %s\n"
-                          % (dt * 1000.0, z[0], z[1], z[2], z[3], h))
-        return "".join(lignes)
 
     def poser(self, image, reperes, mesures, fichier=None, pose=None,
               ouverture=0.0, cible=None):
@@ -1856,36 +1829,6 @@ class FilVue(threading.Thread):
                 continue
             t0 = time.time()
             img, reperes, mesures, fichier, pose, ouv, cible = travail
-            if self.verifier is not None and pose is not None:
-                try:
-                    h = self.verifier(list(pose), ouv)
-                    if h:
-                        self.heurts += 1
-                        self.dernier_heurt = h
-                        # La pose CIBLE est controlee a part : si elle est
-                        # saine alors que l'envoyee ne l'est pas, la faute
-                        # est dans le chemin - rampe ou moyenne - et non dans
-                        # la cinematique. L'inverse accuse le resolveur.
-                        hc = (self.verifier(list(cible), ouv)
-                              if cible is not None else None)
-                        ligne = ("%s  %s\n   envoyee %s  pince %.0f\n"
-                                 "   cible   %s  -> %s\n"
-                                 % (time.strftime("%H:%M:%S"), h,
-                                    " ".join("%.1f" % v for v in pose), ouv,
-                                    " ".join("%.1f" % v for v in cible)
-                                    if cible is not None else "-",
-                                    hc or "saine"))
-                        if self.boite is not None:
-                            ligne += self._passe(ouv)
-                        print("  COLLISION : %s\n%s" % (h, ligne), end="")
-                        try:
-                            with open(self.journal, "a", encoding="utf-8") as f:
-                                f.write(ligne)
-                        except Exception:
-                            pass
-                except Exception as e:
-                    print("  controle de collision : %s" % e)
-                    self.verifier = None
             try:
                 jpeg, dessin = _dessiner(self.main, img, reperes)
                 if jpeg is not None:
@@ -1924,6 +1867,36 @@ class Boite:
 
     def instantane(self):
         return list(self.images)
+
+    def ecrire(self, filtre, ouverture):
+        """Ecrit les dernieres images dans le journal, avec la hauteur de la
+        pince a chaque etage de la chaine : l'etage qui creuse se lit dans
+        la colonne ou la hauteur quitte celle de la cible."""
+        images = self.images[-16:]
+        if not images:
+            return
+        lignes = ["%s  aucune pose sure trouvee\n"
+                  "     dt     z cible  z zone morte  z rampe  z sortie   heurt\n"
+                  % time.strftime("%H:%M:%S")]
+        for _, dt, cible, vise, envoyes, sortie in images:
+            z = []
+            for p in (cible, vise, envoyes, sortie):
+                try:
+                    z.append("%8.1f" % self.bras.fk(p)["z"])
+                except Exception:
+                    z.append("       -")
+            try:
+                h = filtre(list(sortie), ouverture) or ""
+            except Exception:
+                h = ""
+            lignes.append("   %5.0f ms %s %s %s %s   %s\n"
+                          % (dt * 1000.0, z[0], z[1], z[2], z[3], h))
+        try:
+            with open(os.path.expanduser("~/bras_collisions.log"), "a",
+                      encoding="utf-8") as f:
+                f.write("".join(lignes))
+        except Exception:
+            pass
 
 
 def _rampe(cible, courant, vitesse, dt, vmax, amax, bornes=None):
@@ -2239,9 +2212,16 @@ def principal(args) -> int:
     # les pose donc au demarrage, puis on relit ce que la page a deplace.
     boite = Boite()         # enregistreur de vol, vide sur collision
     boite.bras = b
-    fil_vue = FilVue(visu, main, filtre) if visu else None
+    # Le controle de collision ne tourne plus ici : il vivait dans ce fil
+    # pour trouver la cause des heurts, elle est trouvee, et la boucle
+    # corrige desormais la pose avant de l'envoyer. Le garder ferait appeler
+    # le meme objet Collisions par deux fils a la fois - son cache est
+    # construit pose par pose, et deux poses concurrentes le defont l'une
+    # apres l'autre. Mesure : la sortie passait de 0,3 a 11,6 ms alors que
+    # le bloc de correction seul en coute 1,6, et la cadence tombait de
+    # 16,3 a 10,7 images par seconde.
+    fil_vue = FilVue(visu, main, None) if visu else None
     if fil_vue is not None:
-        fil_vue.boite = boite
         fil_vue.start()
 
     molettes = {k: float(r[k]) for k in MOLETTES}
@@ -2493,18 +2473,20 @@ def principal(args) -> int:
             if filtre is not None and filtre(sortie, co) is not None:
                 rattrapes += 1
                 trouve = None
-                for k in range(1, 5):
-                    f = k / 4.0
+                for k in range(1, 3):
+                    f = k / 2.0
                     p = [a + f * (z - a) for a, z in zip(sortie, sol.servos)]
                     if filtre(p, co) is None:
                         trouve = p
                         break
                 if trouve is not None:
                     sortie = trouve
-                elif sure is not None:
-                    sortie = list(sure)
                 else:
-                    sortie = list(sol.servos)
+                    # Meme la cible est refusee : le cas ne s'est jamais
+                    # presente, on le journalise plutot que de le deviner
+                    # plus tard.
+                    sortie = list(sure) if sure is not None else list(sol.servos)
+                    boite.ecrire(filtre, co)
                 sure = list(sortie)
             else:
                 sure = list(sortie)
@@ -2576,10 +2558,7 @@ def principal(args) -> int:
                 if fil_vue is not None:
                     print(f"       vue {fil_vue.ms:5.1f} ms hors boucle"
                           f"   vues abandonnees {fil_vue.abandons}"
-                          + (f"   rattrapes {rattrapes}" if rattrapes else "")
-                          + (f"   COLLISIONS {fil_vue.heurts}"
-                             f" ({fil_vue.dernier_heurt})"
-                             if fil_vue.heurts else ""))
+                          + (f"   rattrapes {rattrapes}" if rattrapes else ""))
                 ki = max(cum["nik"], 1)
                 print(f"       dont  commandes {1000*cum['cmd']/ki:5.1f}"
                       f"  + cinematique {1000*cum['ik']/ki:5.1f}"
