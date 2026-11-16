@@ -1813,13 +1813,15 @@ class FilVue(threading.Thread):
         self.verifier = verifier
         self.heurts = 0
         self.dernier_heurt = None
+        self.journal = os.path.expanduser("~/bras_collisions.log")
 
     def poser(self, image, reperes, mesures, fichier=None, pose=None,
-              ouverture=0.0):
+              ouverture=0.0, cible=None):
         with self.verrou:
             if self.travail is not None:
                 self.abandons += 1
-            self.travail = (image, reperes, mesures, fichier, pose, ouverture)
+            self.travail = (image, reperes, mesures, fichier, pose, ouverture,
+                            cible)
 
     def run(self):
         while not self.arret:
@@ -1829,16 +1831,32 @@ class FilVue(threading.Thread):
                 time.sleep(0.004)
                 continue
             t0 = time.time()
-            img, reperes, mesures, fichier, pose, ouv = travail
+            img, reperes, mesures, fichier, pose, ouv, cible = travail
             if self.verifier is not None and pose is not None:
                 try:
                     h = self.verifier(list(pose), ouv)
                     if h:
                         self.heurts += 1
                         self.dernier_heurt = h
-                        print("  COLLISION sur la pose envoyee : %s" % h)
-                        print("     servos %s  pince %.0f mm"
-                              % (" ".join("%.1f" % v for v in pose), ouv))
+                        # La pose CIBLE est controlee a part : si elle est
+                        # saine alors que l'envoyee ne l'est pas, la faute
+                        # est dans le chemin - rampe ou moyenne - et non dans
+                        # la cinematique. L'inverse accuse le resolveur.
+                        hc = (self.verifier(list(cible), ouv)
+                              if cible is not None else None)
+                        ligne = ("%s  %s\n   envoyee %s  pince %.0f\n"
+                                 "   cible   %s  -> %s\n"
+                                 % (time.strftime("%H:%M:%S"), h,
+                                    " ".join("%.1f" % v for v in pose), ouv,
+                                    " ".join("%.1f" % v for v in cible)
+                                    if cible is not None else "-",
+                                    hc or "saine"))
+                        print("  COLLISION : %s\n%s" % (h, ligne), end="")
+                        try:
+                            with open(self.journal, "a", encoding="utf-8") as f:
+                                f.write(ligne)
+                        except Exception:
+                            pass
                 except Exception as e:
                     print("  controle de collision : %s" % e)
                     self.verifier = None
@@ -2415,7 +2433,7 @@ def principal(args) -> int:
                                     "cos": round(main.cos_t or 0, 2),
                                     "images_s": round(n / max(t - t0, 1e-3), 1),
                                     "main_pct": round(100 * n_main / max(n, 1))},
-                              fichier, sortie, co)
+                              fichier, sortie, co, list(sol.servos))
             if visu:
                 visu.publier(sortie, ouverture=co,
                              source=(f"main  R {cr:.0f}  Z {cz:.0f}  "
